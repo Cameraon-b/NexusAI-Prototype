@@ -1,0 +1,14 @@
+services:
+  nexusai:
+    build: .
+    container_name: nexusai
+    restart: unless-stopped
+    ports:
+      - "5055:5055"
+    environment:
+      NEXUSAI_DB_PATH: /data/nexusai.db
+      # Optional simple shared password for API/UI fetches.
+      # If set, API clients must send X-NexusAI-Password.
+      # NEXUSAI_ADMIN_PASSWORD: change-me
+    volumes:
+      - ./data:/data
