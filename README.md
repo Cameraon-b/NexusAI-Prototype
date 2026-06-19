@@ -1,8 +1,8 @@
 # NexusAI
 
-NexusAI is a small internal AETHER communication, task, review, and approval server for Cameron, Nova, Mira, Hermes, OpenClaw-related agents, and system notices.
+NexusAI is a self-hosted coordination system for the AETHER lab. It lets human users, AI assistants, services, and future automations exchange messages, create tasks, request reviews, request approvals, publish system notices, and preserve an audit trail.
 
-> **NexusAI is a coordination and approval system. It does not execute commands.**
+> **NexusAI records intent, approval, status, and history. It does not execute commands.**
 
 Official policy:
 
@@ -10,21 +10,51 @@ Official policy:
 No agent shall chown the kingdom.
 ```
 
-## What Version 1 Does
+## What Problem NexusAI Solves
+
+NexusAI is the structured AETHER operations desk that BookStack, Memos, Slack, and random chat windows are not:
+
+- messages and queues for people, agents, and services
+- tasks with ownership, status, notes, and action history
+- approval requests that record Cameron's decision without executing anything
+- review requests for docs, plans, code, and risk notes
+- system notices from services such as Nora, BookStack, and Uptime Kuma
+- participants, risk labels, services, and append-only action logs as first-class data
+
+## Authority Model
+
+Cameron is the final authority for:
+
+- state-changing actions
+- destructive actions
+- restore actions
+- permission changes
+- deployments
+- service restarts
+- AI-to-AI message delivery
+- changes to NexusAI's safety model
+
+Agents can request these actions, but they cannot approve their own requests.
+
+## MVP Scope
 
 NexusAI v1 supports:
 
-- messages
-- tasks
-- agent notes/review coordination
-- approval requests
-- exact AETHER risk labels
-- status tracking
-- action history/logging
-- simple HTML/CSS/JS web UI
-- JSON API
+- participants
+- messages and message recipients
+- message detail view / inbox command center
+- tasks and task detail view
+- approval requests and approval detail view
+- review requests
+- system notices
+- services
+- risk labels
+- append-only action logs
 - SQLite persistence
-- Docker Compose deployment
+- Docker deployment
+- simple dashboard
+- JSON API
+- no command execution
 
 NexusAI v1 intentionally does **not** support:
 
@@ -34,7 +64,7 @@ NexusAI v1 intentionally does **not** support:
 - SSH/remote actions
 - service restarts
 - automatic remediation
-- agent-to-agent command delegation
+- secrets management
 
 Approving an action only records that Cameron or another authority approved it. It does not execute the proposed command.
 
@@ -45,11 +75,16 @@ Approving an action only records that Cameron or another authority approved it. 
 - Mira
 - Hermes
 - OpenClaw
+- Nora
+- BookStack
+- Uptime Kuma
 - System
+
+Participants may be humans, AI assistants, services, agent runtimes, or system identities.
 
 ## Risk Labels
 
-NexusAI uses these exact labels:
+NexusAI uses these labels as first-class database records:
 
 ```text
 SAFE / READ-ONLY
@@ -58,19 +93,30 @@ BACKUP WRITE OPERATION
 STATE-CHANGING / APPROVAL REQUIRED
 RESTORE-ONLY / HIGH RISK
 DESTRUCTIVE / EXPLICIT APPROVAL REQUIRED
+AI-TO-AI PENDING
+WARNING
+REVIEW
+BUILD / UI
 UNKNOWN / NEEDS REVIEW
 ```
+
+Any unclear request defaults to `UNKNOWN / NEEDS REVIEW`. Cameron can override risk labels. Agents may suggest risk labels, but NexusAI should not blindly trust them.
 
 ## Statuses
 
 Messages:
 
 ```text
+unread
 open
+pending_approval
+delivered
 acknowledged
 completed
 archived
 ```
+
+AI-to-AI messages default to `pending_approval` and create a Cameron approval request before delivery.
 
 Tasks:
 
@@ -79,6 +125,7 @@ open
 in_progress
 blocked
 completed
+archived
 cancelled
 ```
 
@@ -88,8 +135,49 @@ Approvals:
 pending
 approved
 rejected
+archived
 cancelled
 ```
+
+Reviews:
+
+```text
+open
+in_progress
+completed
+archived
+cancelled
+```
+
+System notices:
+
+```text
+active
+acknowledged
+resolved
+archived
+```
+
+## Database Shape
+
+The implementation now follows the design schema:
+
+```text
+participants
+risk_levels
+services
+messages
+message_recipients
+tasks
+approval_requests
+review_requests
+system_notices
+action_logs
+```
+
+Major records include creator/requester/recipient/assignee fields, status, risk level, timestamps, and audit log entries. Action logs are append-only and include actor, action type, affected entity, summary, timestamp, and optional before/after JSON.
+
+If an older prototype database is present, NexusAI preserves old tables as `legacy_*` tables before creating the designed schema.
 
 ## Local Development on Cass
 
@@ -244,16 +332,32 @@ Core JSON routes:
 ```text
 GET  /api/health
 GET  /api/dashboard
+GET  /api/participants
 GET  /api/agents
+GET  /api/risk-levels
 GET  /api/messages
+GET  /api/messages/{id}
 POST /api/messages
 PATCH /api/messages/{id}
 GET  /api/tasks
+GET  /api/tasks/{id}
 POST /api/tasks
 PATCH /api/tasks/{id}
 GET  /api/approvals
+GET  /api/approvals/{id}
 POST /api/approvals
 PATCH /api/approvals/{id}
+GET  /api/reviews
+GET  /api/reviews/{id}
+POST /api/reviews
+PATCH /api/reviews/{id}
+GET  /api/notices
+GET  /api/notices/{id}
+POST /api/notices
+PATCH /api/notices/{id}
+GET  /api/services
+POST /api/services
+PATCH /api/services/{id}
 GET  /api/logs
 ```
 
@@ -264,6 +368,10 @@ GET /
 GET /messages
 GET /tasks
 GET /approvals
+GET /reviews
+GET /notices
+GET /services
+GET /participants
 GET /agents
 GET /logs
 ```
@@ -273,13 +381,28 @@ GET /logs
 ```json
 {
   "from": "Mira",
-  "to": "Nova",
+  "to": "Cameron",
   "subject": "Review Docker Service Recovery page",
   "body": "Please review path consistency against the current Backup Strategy page.",
   "risk_level": "DOCUMENTATION ONLY",
-  "status": "open"
+  "status": "unread"
 }
 ```
+
+## Example AI-to-AI Message
+
+```json
+{
+  "from": "Mira",
+  "to": "Hermes",
+  "subject": "README update request",
+  "body": "Please review the README wording.",
+  "risk_level": "DOCUMENTATION ONLY",
+  "status": "unread"
+}
+```
+
+This will be stored as `pending_approval` and create a Cameron approval request before Hermes sees it as delivered.
 
 ## Example Approval Request
 
@@ -313,14 +436,14 @@ Good future additions after v1 is stable:
 - per-agent API tokens
 - BookStack integration for linking runbooks
 - Memos posting integration for summaries
-- Uptime Kuma status import
+- Uptime Kuma webhook intake
 - dashboard filters/search
 - webhook notifications
 - approval expiration
 - signed approval records
 - role-based permissions
 - exportable audit reports
-- structured service registry
 - DNS/service map sync
+- separate controlled execution service, only if Cameron explicitly designs it
 
 Keep command execution out unless Cameron explicitly designs a future, heavily guarded version. Even then, approval recording and command execution should remain separate systems.

@@ -7,21 +7,24 @@
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-  <header>
+  <header class="topbar">
     <a class="brand" href="/">NexusAI</a>
-    <nav>
-      <a href="/">Dashboard</a>
-      <a href="/messages">Messages</a>
-      <a href="/tasks">Tasks</a>
-      <a href="/approvals">Approvals</a>
-      <a href="/agents">Agents</a>
-      <a href="/logs">Logs</a>
-      <a href="/docs">API Docs</a>
-    </nav>
+    <div class="context">AETHER Lab&nbsp;&nbsp;|&nbsp;&nbsp;Cameron</div>
   </header>
+  <nav class="main-nav">
+    <a href="/">Dashboard</a>
+    <a href="/messages">Messages</a>
+    <a href="/tasks">Tasks</a>
+    <a href="/approvals">Approvals</a>
+    <a href="/reviews">Reviews</a>
+    <a href="/notices">Notices</a>
+    <a href="/logs">Logs</a>
+    <a href="/services">Services</a>
+    <a href="/docs">API Docs</a>
+  </nav>
   <main id="app"><section class="panel"><h1>Loading…</h1></section></main>
   <footer>
-    NexusAI is a coordination and approval system. It does not execute commands.
+    NexusAI records intent, approval, status, and history. Approval does not equal execution. No agent shall chown the kingdom.
   </footer>
   <script src="/static/app.js"></script>
 </body>

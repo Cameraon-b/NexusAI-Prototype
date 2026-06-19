@@ -7,372 +7,201 @@ const riskLevels = [
   'STATE-CHANGING / APPROVAL REQUIRED',
   'RESTORE-ONLY / HIGH RISK',
   'DESTRUCTIVE / EXPLICIT APPROVAL REQUIRED',
+  'AI-TO-AI PENDING',
+  'WARNING',
+  'REVIEW',
+  'BUILD / UI',
   'UNKNOWN / NEEDS REVIEW'
 ];
-
-const agents = ['Cameron', 'Nova', 'Mira', 'Hermes', 'OpenClaw', 'System'];
+const participants = ['Cameron', 'Nova', 'Mira', 'Hermes', 'OpenClaw', 'Nora', 'BookStack', 'Uptime Kuma', 'System'];
+const messageStatuses = ['unread','open','pending_approval','delivered','acknowledged','completed','archived'];
+const taskStatuses = ['open','in_progress','blocked','completed','archived','cancelled'];
+const approvalStatuses = ['pending','approved','rejected','archived','cancelled'];
+const reviewStatuses = ['open','in_progress','completed','archived','cancelled'];
+const noticeStatuses = ['active','acknowledged','resolved','archived'];
 
 async function api(path, options = {}) {
   const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
   const res = await fetch(API + path, {...options, headers});
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
-  return res.json();
+  return res.status === 204 ? null : res.json();
 }
-
-function esc(value) {
-  return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-}
-
-function riskClass(risk) {
-  if (!risk) return 'unknown';
-  if (risk.includes('SAFE')) return 'safe';
-  if (risk.includes('DOCUMENTATION')) return 'doc';
-  if (risk.includes('BACKUP')) return 'backup';
-  if (risk.includes('STATE')) return 'state';
-  if (risk.includes('RESTORE')) return 'restore';
-  if (risk.includes('DESTRUCTIVE')) return 'destructive';
-  return 'unknown';
-}
-
-function riskBadge(risk) {
-  return `<span class="risk ${riskClass(risk)}">${esc(risk || 'UNKNOWN / NEEDS REVIEW')}</span>`;
-}
-
-function layout(title, body) {
-  document.querySelector('#app').innerHTML = `
-    <section class="panel">
-      <div class="page-heading">
-        <p class="eyebrow">AETHER internal operations</p>
-        <h1>${esc(title)}</h1>
-      </div>
-      ${body}
-    </section>`;
-}
-
-function card(title, value, link, tone = '') {
-  return `<a class="metric ${tone}" href="${link}"><span>${esc(value)}</span><strong>${esc(title)}</strong></a>`;
-}
-
-function renderRows(items, columns) {
+function esc(value) { return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+function titleize(value) { return String(value ?? '').replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase()); }
+function riskBadge(risk) { return `<span class="risk">${esc(risk || 'UNKNOWN / NEEDS REVIEW')}</span>`; }
+function statusPill(status) { return `<span class="status">${esc(titleize(status || 'unknown'))}</span>`; }
+function select(name, values, selected) { return `<select name="${esc(name)}">${values.map(v => `<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(v)}</option>`).join('')}</select>`; }
+function truncate(value, max = 115) { const text = String(value ?? ''); return text.length > max ? `${text.slice(0, max - 1)}…` : text; }
+function page(title, subtitle, body) { document.querySelector('#app').innerHTML = `<section class="panel"><div class="page-title"><h1>${esc(title)}</h1><p>${esc(subtitle)}</p></div>${body}</section>`; }
+function formData(event) { const data = Object.fromEntries(new FormData(event.target).entries()); Object.keys(data).forEach(k => data[k] === '' && delete data[k]); return data; }
+function actionButton(label, fn) { return `<button type="button" onclick="${fn}">${esc(label)}</button>`; }
+function recordList(items, render) { return items.length ? `<div class="record-list">${items.map(render).join('')}</div>` : '<p class="empty-state">No records yet.</p>'; }
+function card(title, value, link) { return `<a class="metric" href="${link}"><strong>${esc(title)}</strong><span>${esc(value)}</span></a>`; }
+function section(title, body, wide = false) { return `<section class="section-card ${wide?'wide':''}"><h2>${esc(title)}</h2><div class="section-body">${body}</div></section>`; }
+function table(items, columns) {
   if (!items.length) return '<p class="empty-state">No records yet.</p>';
   return `<div class="table-wrap"><table><thead><tr>${columns.map(c => `<th>${esc(c.label)}</th>`).join('')}</tr></thead><tbody>${items.map(item => `<tr>${columns.map(c => `<td>${c.render ? c.render(item) : esc(item[c.key])}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
 
-function select(name, values, selected) {
-  return `<select name="${name}">${values.map(v => `<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(v)}</option>`).join('')}</select>`;
-}
-
-function viewButton(kind, id, label = 'Open') {
-  return `<button class="secondary compact" type="button" onclick="open${kind}(${Number(id)})">${esc(label)}</button>`;
-}
-
-function truncate(value, max = 90) {
-  const text = String(value ?? '');
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
-
 async function dashboard() {
   const data = await api('/dashboard');
-  layout('NexusAI Dashboard', `
-    <p class="notice"><strong>AETHER policy:</strong> No agent shall chown the kingdom. NexusAI records coordination and approvals only; it does not execute commands.</p>
+  page('Operations Dashboard', 'Homepage focused on approvals, active work, messages, notices, and audit history.', `
     <div class="metrics">
-      ${card('Open Messages', data.open_messages.length, '/messages', 'blue')}
-      ${card('Open / Active Tasks', data.open_tasks.length, '/tasks', 'green')}
-      ${card('Pending Approvals', data.pending_approvals.length, '/approvals', 'amber')}
-      ${card('Recent Logs', data.recent_logs.length, '/logs', 'slate')}
+      ${card('Pending Approvals', data.pending_approvals.length, '/approvals')}
+      ${card('Open Tasks', data.open_tasks.length, '/tasks')}
+      ${card('Unread Messages', data.open_messages.length, '/messages')}
+      ${card('Active Notices', data.active_notices.length, '/notices')}
     </div>
     <div class="dashboard-grid">
-      <section class="section-card"><h2>Pending Approvals</h2>${renderRows(data.pending_approvals, approvalColumns(false))}</section>
-      <section class="section-card"><h2>Open / Active Tasks</h2>${renderRows(data.open_tasks, taskColumns(false))}</section>
-      <section class="section-card"><h2>Open Messages</h2>${renderRows(data.open_messages, messageColumns(false))}</section>
-      <section class="section-card"><h2>Recent Action Logs</h2>${renderRows(data.recent_logs, logColumns())}</section>
-    </div>
-  `);
+      ${section('Needs Cameron Approval', recordList(data.pending_approvals, approvalRow))}
+      ${section('Recent Messages', recordList(data.open_messages, messageRow))}
+      ${section('My Open Tasks', recordList(data.open_tasks, taskRow))}
+      ${section('System Notices', recordList(data.active_notices, noticeRow))}
+      ${section('Recent Action Log', logLines(data.recent_logs), true)}
+    </div>`);
 }
-
-function messageColumns(actions = true) {
-  return [
-    {label:'Open', render: i => viewButton('Message', i.id)},
-    {label:'ID', key:'id'},
-    {label:'From', key:'from'},
-    {label:'To', key:'to'},
-    {label:'Subject', render: i => `<strong>${esc(i.subject)}</strong>`},
-    {label:'Preview', render: i => `<span class="muted">${esc(truncate(i.body))}</span>`},
-    {label:'Risk', render: i => riskBadge(i.risk_level)},
-    {label:'Status', render: i => statusPill(i.status)},
-    ...(actions ? [{label:'Update', render: i => statusForm('messages', i.id, ['open','acknowledged','completed','archived'], i.status)}] : [])
-  ];
-}
-
-function taskColumns(actions = true) {
-  return [
-    {label:'Open', render: i => viewButton('Task', i.id)},
-    {label:'ID', key:'id'},
-    {label:'Title', render: i => `<strong>${esc(i.title)}</strong>`},
-    {label:'By', key:'created_by'},
-    {label:'Assigned', key:'assigned_to'},
-    {label:'Description', render: i => `<span class="muted">${esc(truncate(i.description))}</span>`},
-    {label:'Risk', render: i => riskBadge(i.risk_level)},
-    {label:'Status', render: i => statusPill(i.status)},
-    ...(actions ? [{label:'Update', render: i => statusForm('tasks', i.id, ['open','in_progress','blocked','completed','cancelled'], i.status, true)}] : [])
-  ];
-}
-
-function approvalColumns(actions = true) {
-  return [
-    {label:'Open', render: i => viewButton('Approval', i.id)},
-    {label:'ID', key:'id'},
-    {label:'Requested By', key:'requested_by'},
-    {label:'For', key:'requested_for'},
-    {label:'Action', render: i => `<strong>${esc(i.action_summary)}</strong>`},
-    {label:'Risk', render: i => riskBadge(i.risk_level)},
-    {label:'Status', render: i => statusPill(i.status)},
-    ...(actions ? [{label:'Update', render: i => approvalForm(i)}] : [])
-  ];
-}
-
-function logColumns() {
-  return [
-    {label:'Time', key:'timestamp'},
-    {label:'Actor', key:'actor'},
-    {label:'Action', key:'action_type'},
-    {label:'Target', render: i => `${esc(i.target_type)} #${esc(i.target_id)}`},
-    {label:'Summary', key:'summary'}
-  ];
-}
-
-function statusPill(status) {
-  return `<span class="status ${esc(status)}">${esc(status)}</span>`;
-}
-
-function statusForm(type, id, statuses, current, notes = false) {
-  return `<form class="inline" onsubmit="patchStatus(event, '${type}', ${id})">
-    ${select('status', statuses, current)}
-    ${notes ? '<input name="completion_notes" placeholder="completion notes">' : ''}
-    <button>Save</button>
-  </form>`;
-}
-
-function approvalForm(item) {
-  return `<form class="inline" onsubmit="patchApproval(event, ${item.id})">
-    ${select('status', ['pending','approved','rejected','cancelled'], item.status)}
-    <input name="approved_by" placeholder="approved by" value="${item.status === 'approved' ? esc(item.approved_by) : ''}">
-    <input name="rejection_reason" placeholder="rejection reason">
-    <button>Save</button>
-  </form>`;
-}
-
-async function patchStatus(event, type, id) {
-  event.preventDefault();
-  const data = Object.fromEntries(new FormData(event.target).entries());
-  Object.keys(data).forEach(k => data[k] === '' && delete data[k]);
-  await api(`/${type}/${id}`, {method:'PATCH', body: JSON.stringify(data)});
-  closeModal();
-  route();
-}
-
-async function patchApproval(event, id) {
-  event.preventDefault();
-  const data = Object.fromEntries(new FormData(event.target).entries());
-  Object.keys(data).forEach(k => data[k] === '' && delete data[k]);
-  await api(`/approvals/${id}`, {method:'PATCH', body: JSON.stringify(data)});
-  closeModal();
-  route();
-}
-
-function field(label, value, mode = 'text') {
-  const display = value || '—';
-  const className = mode === 'long' ? 'detail-value long-text' : mode === 'code' ? 'detail-value command-text' : 'detail-value';
-  const tag = mode === 'code' ? 'pre' : 'div';
-  return `<div class="detail-field"><dt>${esc(label)}</dt><dd><${tag} class="${className}">${esc(display)}</${tag}></dd></div>`;
-}
-
-function modal(title, body) {
-  closeModal();
-  const wrapper = document.createElement('div');
-  wrapper.className = 'modal-backdrop';
-  wrapper.id = 'detail-modal';
-  wrapper.innerHTML = `
-    <section class="modal-card" role="dialog" aria-modal="true" aria-label="${esc(title)}">
-      <header class="modal-header">
-        <div><p class="eyebrow">Record detail</p><h2>${esc(title)}</h2></div>
-        <button class="icon-button" type="button" onclick="closeModal()" aria-label="Close detail view">×</button>
-      </header>
-      <div class="modal-body">${body}</div>
-    </section>`;
-  wrapper.addEventListener('click', event => {
-    if (event.target === wrapper) closeModal();
-  });
-  document.body.appendChild(wrapper);
-}
-
-function closeModal() {
-  document.querySelector('#detail-modal')?.remove();
-}
-
-async function findById(path, id) {
-  const items = await api(path);
-  const item = items.find(record => Number(record.id) === Number(id));
-  if (!item) throw new Error(`Record #${id} not found`);
-  return item;
-}
-
-async function openMessage(id) {
-  try {
-    const item = await findById('/messages', id);
-    modal(`Message #${item.id}: ${item.subject}`, `
-      <dl class="detail-grid">
-        ${field('ID', item.id)}
-        ${field('From', item.from)}
-        ${field('To', item.to)}
-        ${field('Subject', item.subject)}
-        <div class="detail-field full"><dt>Full body</dt><dd><div class="detail-value long-text">${esc(item.body)}</div></dd></div>
-        <div class="detail-field"><dt>Risk level</dt><dd>${riskBadge(item.risk_level)}</dd></div>
-        <div class="detail-field"><dt>Status</dt><dd>${statusPill(item.status)}</dd></div>
-        ${field('Created at', item.created_at)}
-        ${field('Updated at', item.updated_at)}
-      </dl>
-      <div class="detail-actions">
-        <h3>Update status</h3>
-        ${statusForm('messages', item.id, ['open','acknowledged','completed','archived'], item.status)}
-      </div>`);
-  } catch (err) {
-    layout('Error', `<pre>${esc(err.stack || err.message || err)}</pre>`);
-  }
-}
-
-async function openTask(id) {
-  try {
-    const item = await findById('/tasks', id);
-    modal(`Task #${item.id}: ${item.title}`, `
-      <dl class="detail-grid">
-        ${field('ID', item.id)}
-        ${field('Title', item.title)}
-        <div class="detail-field full"><dt>Full description</dt><dd><div class="detail-value long-text">${esc(item.description)}</div></dd></div>
-        ${field('Created by', item.created_by)}
-        ${field('Assigned to', item.assigned_to)}
-        <div class="detail-field"><dt>Risk level</dt><dd>${riskBadge(item.risk_level)}</dd></div>
-        <div class="detail-field"><dt>Status</dt><dd>${statusPill(item.status)}</dd></div>
-        ${field('Completion notes', item.completion_notes, 'long')}
-        ${field('Created at', item.created_at)}
-        ${field('Updated at', item.updated_at)}
-      </dl>
-      <div class="detail-actions">
-        <h3>Update status</h3>
-        ${statusForm('tasks', item.id, ['open','in_progress','blocked','completed','cancelled'], item.status, true)}
-      </div>`);
-  } catch (err) {
-    layout('Error', `<pre>${esc(err.stack || err.message || err)}</pre>`);
-  }
-}
-
-async function openApproval(id) {
-  try {
-    const item = await findById('/approvals', id);
-    modal(`Approval #${item.id}: ${item.action_summary}`, `
-      <p class="notice subtle"><strong>Safety:</strong> Proposed commands are displayed as inert text only. NexusAI has no run button and does not execute commands.</p>
-      <dl class="detail-grid">
-        ${field('ID', item.id)}
-        ${field('Requested by', item.requested_by)}
-        ${field('Requested for', item.requested_for)}
-        ${field('Action summary', item.action_summary)}
-        <div class="detail-field full"><dt>Proposed command / action text</dt><dd>
-          <pre class="detail-value command-text">${esc(item.proposed_command || '—')}</pre>
-          <button class="secondary compact" type="button" data-copy="${esc(item.proposed_command || '')}">Copy text</button>
-        </dd></div>
-        <div class="detail-field"><dt>Risk level</dt><dd>${riskBadge(item.risk_level)}</dd></div>
-        <div class="detail-field full"><dt>Reason</dt><dd><div class="detail-value long-text">${esc(item.reason)}</div></dd></div>
-        <div class="detail-field"><dt>Status</dt><dd>${statusPill(item.status)}</dd></div>
-        ${field('Approved by', item.approved_by)}
-        ${field('Approved at', item.approved_at)}
-        ${field('Rejection reason', item.rejection_reason, 'long')}
-        ${field('Created at', item.created_at)}
-        ${field('Updated at', item.updated_at)}
-      </dl>
-      <div class="detail-actions">
-        <h3>Record approval status</h3>
-        ${approvalForm(item)}
-      </div>`);
-  } catch (err) {
-    layout('Error', `<pre>${esc(err.stack || err.message || err)}</pre>`);
-  }
-}
+function messageRow(item) { return `<button class="record-row" onclick="openMessage(${item.id})"><span>${riskBadge(item.risk_level)}${statusPill(item.status)}</span><div class="row-title">${esc(item.from)} → ${esc(item.to)}: ${esc(item.subject)}</div><div class="row-meta">${esc(truncate(item.body))}</div></button>`; }
+function taskRow(item) { return `<button class="record-row" onclick="openTask(${item.id})"><span>${riskBadge(item.risk_level)}${statusPill(item.status)}</span><div class="row-title">${esc(item.title)}</div><div class="row-meta">${esc(item.assigned_to)} · ${esc(truncate(item.description))}</div></button>`; }
+function approvalRow(item) { return `<button class="record-row" onclick="openApproval(${item.id})"><span>${riskBadge(item.risk_level)}${statusPill(item.status)}</span><div class="row-title">${esc(item.action_summary)}</div><div class="row-meta">Reason: ${esc(truncate(item.reason || 'No reason given'))}</div></button>`; }
+function reviewRow(item) { return `<button class="record-row" onclick="openReview(${item.id})"><span>${riskBadge(item.risk_level)}${statusPill(item.status)}</span><div class="row-title">${esc(item.title)}</div><div class="row-meta">${esc(item.requested_by)} → ${esc(item.reviewer)} · ${esc(truncate(item.body))}</div></button>`; }
+function noticeRow(item) { return `<button class="record-row" onclick="openNotice(${item.id})"><span>${riskBadge(item.risk_level)}${statusPill(item.status)}</span><div class="row-title">${esc(item.service || item.source)}: ${esc(item.title)}</div><div class="row-meta">${esc(truncate(item.body))}</div></button>`; }
+function logLines(items) { return items.length ? items.map(l => `<div>${esc(l.timestamp)} ${esc(l.actor)} ${esc(l.summary)}</div>`).join('') : '<p class="empty-state">No audit log entries yet.</p>'; }
 
 async function pageMessages() {
-  const items = await api('/messages');
-  layout('Messages', `
-    <form class="grid record-form" onsubmit="createMessage(event)">
-      ${select('from', agents, 'Mira')}${select('to', agents, 'Nova')}
+  const [items, approvals, notices] = await Promise.all([api('/messages'), api('/approvals'), api('/notices')]);
+  const selected = items[0];
+  page('Inbox / Command Center', 'Homepage focused on conversations, queues, and selected item detail.', `
+    <form class="grid" onsubmit="createMessage(event)">
+      ${select('from', participants, 'Mira')}${select('to', participants, 'Cameron')}
       <input name="subject" placeholder="Subject" required>
       ${select('risk_level', riskLevels, 'DOCUMENTATION ONLY')}
       <textarea name="body" placeholder="Message body" required></textarea>
-      ${select('status', ['open','acknowledged','completed','archived'], 'open')}
-      <button>Create Message</button>
+      ${select('status', messageStatuses, 'unread')}
+      <button>+ New Message</button>
     </form>
-    ${renderRows(items, messageColumns())}
-  `);
+    <div class="command-layout">
+      <section class="wire-card"><h2>Queues</h2><div class="queue-list">
+        <div class="queue-item"><span>Cameron Inbox</span><span>(${items.filter(i => i.to === 'Cameron' && !['archived','completed'].includes(i.status)).length})</span></div>
+        <div class="queue-item"><span>Pending Approvals</span><span>(${approvals.filter(i => i.status === 'pending').length})</span></div>
+        <div class="queue-item"><span>AI-to-AI Pending</span><span>(${items.filter(i => i.status === 'pending_approval').length})</span></div>
+        <div class="queue-item"><span>System Notices</span><span>(${notices.filter(i => i.status === 'active').length})</span></div>
+        <div class="recent-list"><strong>Recent</strong>${recordList(items.slice(0, 8), i => `<button class="record-row" onclick="openMessage(${i.id})">${esc(i.from)}: ${esc(i.subject)}</button>`)}</div>
+      </div></section>
+      <section class="wire-card"><h2>Selected Message</h2><div class="detail-shell">${selected ? messageDetailHtml(selected) : '<p class="empty-state">No selected message.</p>'}</div></section>
+    </div>
+    <section class="section-card wide" style="margin-top:28px"><h2>Pending Approval Strip</h2><div class="section-body">${approvals.filter(a => a.status === 'pending').map(a => `<button class="linkish" onclick="openApproval(${a.id})">${esc(a.requested_by)} requests ${esc(a.action_type)}</button>`).join(' &nbsp;|&nbsp; ') || 'No pending approvals.'}</div></section>`);
 }
-
-async function createMessage(event) {
-  event.preventDefault();
-  await api('/messages', {method:'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target).entries()))});
-  route();
-}
+function messageDetailHtml(item) { return `
+  <p>From: ${esc(item.from)}</p><p>To: ${esc(item.to)}</p><p>${riskBadge(item.risk_level)}${statusPill(item.status)}</p>
+  <h3>Subject: ${esc(item.subject)}</h3>
+  <h3>Full body</h3><div class="detail-box tall">${esc(item.body)}</div>
+  <div class="detail-actions">
+    ${actionButton('Acknowledge', `patchStatus('messages', ${item.id}, 'acknowledged')`)}
+    ${actionButton('Create Task', `prefillTaskFromMessage(${item.id})`)}
+    ${actionButton('Request Review', `prefillReviewFromMessage(${item.id})`)}
+    ${actionButton('Archive', `patchStatus('messages', ${item.id}, 'archived')`)}
+  </div>`; }
+async function openMessage(id) { const item = await api(`/messages/${id}`); page('Message Detail View', 'Shows sender, recipient, status, risk, full message, and safe follow-up actions.', `<section class="detail-card"><h2>Message #${item.id} - ${esc(item.subject)}</h2><div class="detail-card-body">${messageDetailHtml(item)}</div></section>`); }
+async function createMessage(event) { event.preventDefault(); await api('/messages', {method:'POST', body: JSON.stringify(formData(event))}); route(); }
+function prefillTaskFromMessage(id) { window.location.href = `/tasks?from_message=${id}`; }
+function prefillReviewFromMessage(id) { window.location.href = `/reviews?from_message=${id}`; }
 
 async function pageTasks() {
   const items = await api('/tasks');
-  layout('Tasks', `
-    <form class="grid record-form" onsubmit="createTask(event)">
-      <input name="title" placeholder="Title" required>
-      <textarea name="description" placeholder="Description" required></textarea>
-      ${select('created_by', agents, 'Hermes')}${select('assigned_to', agents, 'Mira')}
-      ${select('risk_level', riskLevels, 'UNKNOWN / NEEDS REVIEW')}${select('status', ['open','in_progress','blocked','completed','cancelled'], 'open')}
+  page('Tasks', 'Tasks can be assigned, opened, started, blocked, completed, archived, and audited.', `
+    <form class="grid" onsubmit="createTask(event)">
+      <input name="title" placeholder="Title" required><textarea name="description" placeholder="Description" required></textarea>
+      ${select('created_by', participants, 'Cameron')}${select('assigned_to', participants, 'Hermes')}
+      ${select('risk_level', riskLevels, 'BUILD / UI')}${select('status', taskStatuses, 'open')}
       <button>Create Task</button>
     </form>
-    ${renderRows(items, taskColumns())}
-  `);
+    ${table(items, [{label:'Open', render:i=>`<button class="compact" onclick="openTask(${i.id})">Open</button>`},{label:'Title', render:i=>`<strong>${esc(i.title)}</strong>`},{label:'Assigned', key:'assigned_to'},{label:'Risk', render:i=>riskBadge(i.risk_level)},{label:'Status', render:i=>statusPill(i.status)},{label:'Description', render:i=>esc(truncate(i.description))}])}`);
 }
-
-async function createTask(event) {
-  event.preventDefault();
-  await api('/tasks', {method:'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target).entries()))});
-  route();
+async function openTask(id) {
+  const [item, logs] = await Promise.all([api(`/tasks/${id}`), api('/logs')]);
+  const history = logs.filter(l => l.target_type === 'task' && Number(l.target_id) === Number(id));
+  page('Task Detail View', 'Shows full task description, status, assignment, notes, and action history.', `
+    <div class="detail-page-grid">
+      <section class="detail-card"><h2>Task #${item.id} - ${esc(item.title)}</h2><div class="detail-card-body">
+        <p>Created by: ${esc(item.created_by)}</p><p>Assigned to: ${esc(item.assigned_to)}</p><p>Status: ${esc(titleize(item.status))}</p><p>${riskBadge(item.risk_level)}</p>
+        <h3>Full description</h3><div class="detail-box tall">${esc(item.description)}</div>
+        <h3>Completion Notes</h3><textarea id="completion-notes" class="detail-box">${esc(item.completion_notes)}</textarea>
+        <h3>Blocked Reason</h3><textarea id="blocked-reason" class="detail-box">${esc(item.blocked_reason)}</textarea>
+        <div class="detail-actions">
+          ${actionButton('Start', `patchTask(${item.id}, 'in_progress')`)}
+          ${actionButton('Block', `patchTask(${item.id}, 'blocked')`)}
+          ${actionButton('Complete', `patchTask(${item.id}, 'completed')`)}
+          ${actionButton('Archive', `patchTask(${item.id}, 'archived')`)}
+        </div>
+      </div></section>
+      <section class="detail-card"><h2>Action History</h2><div class="detail-card-body history-list">${logLines(history)}<br><br>Future:<br>Hermes submits change report<br>Cameron marks complete</div></section>
+    </div>`);
 }
+async function createTask(event) { event.preventDefault(); await api('/tasks', {method:'POST', body: JSON.stringify(formData(event))}); route(); }
+async function patchTask(id, status) { await api(`/tasks/${id}`, {method:'PATCH', body: JSON.stringify({status, completion_notes: document.querySelector('#completion-notes')?.value || '', blocked_reason: document.querySelector('#blocked-reason')?.value || ''})}); openTask(id); }
 
 async function pageApprovals() {
   const items = await api('/approvals');
-  layout('Approval Requests', `
-    <p class="notice subtle"><strong>Reminder:</strong> Approval records are coordination notes only. They never execute proposed commands.</p>
-    <form class="grid record-form" onsubmit="createApproval(event)">
-      ${select('requested_by', agents, 'Hermes')}${select('requested_for', agents, 'Cameron')}
-      <input name="action_summary" placeholder="Action summary" required>
-      ${select('risk_level', riskLevels, 'STATE-CHANGING / APPROVAL REQUIRED')}
-      <textarea name="proposed_command" placeholder="Proposed command or action. Recorded only; never executed." required></textarea>
-      <textarea name="reason" placeholder="Reason" required></textarea>
-      ${select('status', ['pending','approved','rejected','cancelled'], 'pending')}
-      <button>Create Approval Request</button>
+  page('Approvals', 'Approval requests record human decisions. Approval does not execute the action.', `
+    <p class="notice strong">Safety warning: Approval records permission only. NexusAI will not execute proposed commands.</p>
+    <form class="grid" onsubmit="createApproval(event)">
+      ${select('requested_by', participants, 'Hermes')}${select('requested_for', participants, 'Cameron')}
+      <input name="action_summary" placeholder="Action summary" required>${select('risk_level', riskLevels, 'STATE-CHANGING / APPROVAL REQUIRED')}
+      <textarea name="proposed_command" placeholder="Proposed Command - text only"></textarea><textarea name="reason" placeholder="Reason"></textarea>
+      ${select('status', approvalStatuses, 'pending')}<button>Create Approval Request</button>
     </form>
-    ${renderRows(items, approvalColumns())}
-  `);
+    ${table(items, [{label:'Open', render:i=>`<button class="compact" onclick="openApproval(${i.id})">Open</button>`},{label:'Action', key:'action_summary'},{label:'Requested By', key:'requested_by'},{label:'For', key:'requested_for'},{label:'Risk', render:i=>riskBadge(i.risk_level)},{label:'Status', render:i=>statusPill(i.status)}])}`);
 }
+async function openApproval(id) {
+  const item = await api(`/approvals/${id}`);
+  page('Approval Detail View', 'Focused on safe human review before any action is taken.', `
+    <section class="detail-card"><h2>Approval Request #${item.id}</h2><div class="detail-card-body">
+      <p>Requested by: ${esc(item.requested_by)}</p><p>Requested for: ${esc(item.requested_for)}</p><p>Status: ${esc(titleize(item.status))}</p><p>${riskBadge(item.risk_level)}</p>
+      <h3>Action Summary</h3><div class="detail-box">${esc(item.action_summary)}</div>
+      <h3>Reason</h3><div class="detail-box">${esc(item.reason)}</div>
+      <h3>Proposed command / action text - text only</h3><pre class="detail-box command-text">${esc(item.proposed_command || '—')}</pre>
+      <div class="safety-warning">Safety warning: Approval records permission only. NexusAI will not execute this command.</div>
+      <div class="detail-actions">
+        ${actionButton('Approve', `patchApproval(${item.id}, 'approved')`)}
+        ${actionButton('Reject', `patchApproval(${item.id}, 'rejected')`)}
+        ${actionButton('Archive', `patchApproval(${item.id}, 'archived')`)}
+      </div>
+    </div></section>`);
+}
+async function createApproval(event) { event.preventDefault(); await api('/approvals', {method:'POST', body: JSON.stringify(formData(event))}); route(); }
+async function patchApproval(id, status) { await api(`/approvals/${id}`, {method:'PATCH', body: JSON.stringify({status, approved_by:'Cameron', decision_notes:`Cameron marked ${status}.`})}); openApproval(id); }
 
-async function createApproval(event) {
-  event.preventDefault();
-  await api('/approvals', {method:'POST', body: JSON.stringify(Object.fromEntries(new FormData(event.target).entries()))});
-  route();
+async function pageReviews() {
+  const items = await api('/reviews');
+  page('Reviews', 'Review requests let agents and people ask for architecture, code, documentation, and risk feedback.', `
+    <form class="grid" onsubmit="createReview(event)">
+      <input name="title" placeholder="Review title" required><textarea name="body" placeholder="Review request body" required></textarea>
+      ${select('requested_by', participants, 'Hermes')}${select('reviewer', participants, 'Nova')}
+      <input name="target_type" placeholder="Target type" value="documentation"><input name="target_ref" placeholder="Target reference">
+      ${select('risk_level', riskLevels, 'REVIEW')}${select('status', reviewStatuses, 'open')}<button>Create Review Request</button>
+    </form>${table(items, [{label:'Open', render:i=>`<button class="compact" onclick="openReview(${i.id})">Open</button>`},{label:'Title', key:'title'},{label:'Requested By', key:'requested_by'},{label:'Reviewer', key:'reviewer'},{label:'Risk', render:i=>riskBadge(i.risk_level)},{label:'Status', render:i=>statusPill(i.status)}])}`);
 }
+async function openReview(id) { const item = await api(`/reviews/${id}`); page('Review Detail View', 'Focused on review notes, target references, and recorded status.', `<section class="detail-card"><h2>Review Request #${item.id} - ${esc(item.title)}</h2><div class="detail-card-body"><p>${riskBadge(item.risk_level)}${statusPill(item.status)}</p><p>Requested by: ${esc(item.requested_by)}</p><p>Reviewer: ${esc(item.reviewer)}</p><p>Target: ${esc(item.target_type)} ${esc(item.target_ref)}</p><h3>Request</h3><div class="detail-box tall">${esc(item.body)}</div><h3>Review Notes</h3><textarea id="review-notes" class="detail-box">${esc(item.review_notes)}</textarea><div class="detail-actions">${actionButton('Start', `patchReview(${item.id}, 'in_progress')`)}${actionButton('Complete', `patchReview(${item.id}, 'completed')`)}${actionButton('Archive', `patchReview(${item.id}, 'archived')`)}</div></div></section>`); }
+async function createReview(event) { event.preventDefault(); await api('/reviews', {method:'POST', body: JSON.stringify(formData(event))}); route(); }
+async function patchReview(id, status) { await api(`/reviews/${id}`, {method:'PATCH', body: JSON.stringify({status, review_notes: document.querySelector('#review-notes')?.value || ''})}); openReview(id); }
 
-async function pageAgents() {
-  const items = await api('/agents');
-  layout('Agents', renderRows(items, [
-    {label:'ID', key:'id'}, {label:'Name', key:'name'}, {label:'Description', key:'description'}, {label:'Created', key:'created_at'}
-  ]));
+async function pageNotices() {
+  const items = await api('/notices');
+  page('System Notices', 'Services create notices for outages, recovery, warnings, and scheduled maintenance.', `
+    <form class="grid" onsubmit="createNotice(event)">
+      <input name="service" placeholder="Service" value="Uptime Kuma"><input name="source" placeholder="Source" value="System">
+      <input name="severity" placeholder="Severity" value="warning"><input name="title" placeholder="Title" required>
+      <textarea name="body" placeholder="Notice body" required></textarea>${select('risk_level', riskLevels, 'WARNING')}${select('status', noticeStatuses, 'active')}<button>Create Notice</button>
+    </form>${table(items, [{label:'Open', render:i=>`<button class="compact" onclick="openNotice(${i.id})">Open</button>`},{label:'Service', key:'service'},{label:'Title', key:'title'},{label:'Severity', key:'severity'},{label:'Risk', render:i=>riskBadge(i.risk_level)},{label:'Status', render:i=>statusPill(i.status)}])}`);
 }
+async function openNotice(id) { const item = await api(`/notices/${id}`); page('Notice Detail View', 'Focused on service events and monitor history. Notices do not execute remediation.', `<section class="detail-card"><h2>Notice #${item.id} - ${esc(item.title)}</h2><div class="detail-card-body"><p>Service: ${esc(item.service)}</p><p>Source: ${esc(item.source)}</p><p>Severity: ${esc(item.severity)}</p><p>${riskBadge(item.risk_level)}${statusPill(item.status)}</p><h3>Body</h3><div class="detail-box tall">${esc(item.body)}</div><div class="detail-actions">${actionButton('Acknowledge', `patchNotice(${item.id}, 'acknowledged')`)}${actionButton('Resolve', `patchNotice(${item.id}, 'resolved')`)}${actionButton('Archive', `patchNotice(${item.id}, 'archived')`)}</div></div></section>`); }
+async function createNotice(event) { event.preventDefault(); await api('/notices', {method:'POST', body: JSON.stringify(formData(event))}); route(); }
+async function patchNotice(id, status) { await api(`/notices/${id}`, {method:'PATCH', body: JSON.stringify({status})}); openNotice(id); }
 
-async function pageLogs() {
-  const items = await api('/logs');
-  layout('Action Log', renderRows(items, logColumns()));
-}
+async function pageServices() { const items = await api('/services'); page('Services', 'Internal systems and applications that NexusAI tracks or receives notices from.', table(items, [{label:'Name', key:'name'},{label:'Type', key:'service_type'},{label:'URL', key:'url'},{label:'Host', key:'host'},{label:'Notes', key:'notes'},{label:'Active', render:i=> i.is_active ? 'yes' : 'no'}])); }
+async function pageParticipants() { const items = await api('/participants'); page('Participants', 'Humans, AI assistants, services, and system identities that create, receive, or are assigned NexusAI records.', table(items, [{label:'Display Name', key:'display_name'},{label:'Type', key:'participant_type'},{label:'Role', key:'role_description'},{label:'Active', render:i=> i.is_active ? 'yes' : 'no'}])); }
+async function pageLogs() { const items = await api('/logs'); page('Action Log', 'Append-only audit history. Meaningful activity inside NexusAI creates a log entry.', table(items, [{label:'Time', key:'timestamp'},{label:'Actor', key:'actor'},{label:'Action', key:'action_type'},{label:'Entity', render:i=>`${esc(i.target_type)} #${esc(i.target_id ?? '')}`},{label:'Summary', key:'summary'}])); }
+async function patchStatus(type, id, status) { await api(`/${type}/${id}`, {method:'PATCH', body: JSON.stringify({status})}); route(); }
 
 async function route() {
   try {
@@ -380,28 +209,12 @@ async function route() {
     if (path === '/messages') return pageMessages();
     if (path === '/tasks') return pageTasks();
     if (path === '/approvals') return pageApprovals();
-    if (path === '/agents') return pageAgents();
+    if (path === '/reviews') return pageReviews();
+    if (path === '/notices') return pageNotices();
+    if (path === '/services') return pageServices();
+    if (path === '/participants' || path === '/agents') return pageParticipants();
     if (path === '/logs') return pageLogs();
     return dashboard();
-  } catch (err) {
-    layout('Error', `<pre>${esc(err.stack || err.message || err)}</pre>`);
-  }
+  } catch (err) { page('Error', 'NexusAI could not render this view.', `<pre>${esc(err.stack || err.message || err)}</pre>`); }
 }
-
-document.addEventListener('click', async event => {
-  const copyButton = event.target.closest('[data-copy]');
-  if (!copyButton) return;
-  try {
-    await navigator.clipboard.writeText(copyButton.dataset.copy || '');
-    copyButton.textContent = 'Copied';
-    setTimeout(() => { copyButton.textContent = 'Copy text'; }, 1200);
-  } catch (_) {
-    copyButton.textContent = 'Copy unavailable';
-  }
-});
-
-document.addEventListener('keydown', event => {
-  if (event.key === 'Escape') closeModal();
-});
-
 route();

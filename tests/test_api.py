@@ -21,34 +21,66 @@ def client(tmp_path: Path):
             os.environ['NEXUSAI_DB_PATH'] = old_db
 
 
-def test_agents_seeded(tmp_path):
+def test_participants_and_reference_data_seeded(tmp_path):
     with client(tmp_path) as c:
-        res = c.get('/api/agents')
+        res = c.get('/api/participants')
         assert res.status_code == 200
-        names = [a['name'] for a in res.json()]
-        assert names == ['Cameron', 'Nova', 'Mira', 'Hermes', 'OpenClaw', 'System']
+        display_names = [a['display_name'] for a in res.json()]
+        for name in ['Cameron', 'Nova', 'Mira', 'Hermes', 'OpenClaw', 'Nora', 'BookStack', 'Uptime Kuma', 'System']:
+            assert name in display_names
+
+        risks = [r['name'] for r in c.get('/api/risk-levels').json()]
+        assert 'AI-TO-AI PENDING' in risks
+        assert 'BUILD / UI' in risks
 
 
-def test_create_message_and_logs_action(tmp_path):
+def test_create_human_message_and_logs_action(tmp_path):
     with client(tmp_path) as c:
         payload = {
             'from': 'Mira',
-            'to': 'Nova',
+            'to': 'Cameron',
             'subject': 'Review Docker Service Recovery page',
             'body': 'Please review path consistency against the current Backup Strategy page.',
             'risk_level': 'DOCUMENTATION ONLY',
-            'status': 'open',
+            'status': 'unread',
         }
         res = c.post('/api/messages', json=payload)
         assert res.status_code == 201
         msg = res.json()
         assert msg['id'] > 0
         assert msg['from'] == 'Mira'
-        assert msg['to'] == 'Nova'
+        assert msg['to'] == 'Cameron'
         assert msg['risk_level'] == 'DOCUMENTATION ONLY'
+        assert msg['status'] == 'unread'
+        assert msg['requires_approval'] is False
 
         logs = c.get('/api/logs').json()
         assert any(l['action_type'] == 'create' and l['target_type'] == 'message' and l['target_id'] == msg['id'] for l in logs)
+
+
+def test_ai_to_ai_message_requires_approval_and_approval_delivers(tmp_path):
+    with client(tmp_path) as c:
+        res = c.post('/api/messages', json={
+            'from': 'Mira',
+            'to': 'Hermes',
+            'subject': 'README update request',
+            'body': 'Please review the README wording.',
+            'risk_level': 'DOCUMENTATION ONLY',
+            'status': 'unread',
+        })
+        assert res.status_code == 201
+        msg = res.json()
+        assert msg['status'] == 'pending_approval'
+        assert msg['requires_approval'] is True
+        assert msg['delivery_status'] == 'pending_approval'
+
+        approvals = c.get('/api/approvals').json()
+        delivery_approval = next(a for a in approvals if a['target_type'] == 'message' and a['target_id'] == msg['id'])
+        approved = c.patch(f"/api/approvals/{delivery_approval['id']}", json={'status': 'approved', 'approved_by': 'Cameron'})
+        assert approved.status_code == 200
+        delivered = c.get(f"/api/messages/{msg['id']}").json()
+        assert delivered['status'] == 'delivered'
+        assert delivered['requires_approval'] is False
 
 
 def test_create_and_patch_task(tmp_path):
@@ -68,6 +100,7 @@ def test_create_and_patch_task(tmp_path):
         assert patched.status_code == 200
         assert patched.json()['status'] == 'completed'
         assert patched.json()['completion_notes'] == 'Draft complete.'
+        assert patched.json()['completed_at']
 
 
 def test_approval_records_but_does_not_execute(tmp_path):
@@ -91,6 +124,41 @@ def test_approval_records_but_does_not_execute(tmp_path):
         assert body['approved_by'] == 'Cameron'
         assert body['proposed_command'].startswith('cd /home/noratheredeemer')
 
+        logs = c.get('/api/logs').json()
+        assert any('no command executed' in l['summary'].lower() for l in logs)
+
+
+def test_review_notice_and_service_endpoints(tmp_path):
+    with client(tmp_path) as c:
+        review = c.post('/api/reviews', json={
+            'title': 'Review NexusAI schema',
+            'body': 'Check participant and risk-level normalization.',
+            'requested_by': 'Hermes',
+            'reviewer': 'Nova',
+            'target_type': 'database',
+            'target_ref': 'docs/NexusAIDBV1.0.png',
+            'risk_level': 'REVIEW',
+            'status': 'open',
+        })
+        assert review.status_code == 201
+        assert review.json()['reviewer'] == 'Nova'
+
+        notice = c.post('/api/notices', json={
+            'service': 'BookStack',
+            'source': 'Uptime Kuma',
+            'severity': 'warning',
+            'title': 'BookStack response time elevated',
+            'body': 'Monitor warning only. No remediation was executed.',
+            'risk_level': 'WARNING',
+            'status': 'active',
+        })
+        assert notice.status_code == 201
+        assert notice.json()['service'] == 'BookStack'
+
+        services = c.get('/api/services')
+        assert services.status_code == 200
+        assert any(s['name'] == 'NexusAI' for s in services.json())
+
 
 def test_invalid_risk_label_rejected(tmp_path):
     with client(tmp_path) as c:
@@ -105,7 +173,16 @@ def test_invalid_risk_label_rejected(tmp_path):
         assert res.status_code == 422
 
 
-def test_ui_static_exposes_record_detail_views_and_no_run_buttons(tmp_path):
+def test_dashboard_matches_design_material_sections(tmp_path):
+    with client(tmp_path) as c:
+        dash = c.get('/api/dashboard')
+        assert dash.status_code == 200
+        body = dash.json()
+        for key in ['open_messages', 'open_tasks', 'pending_approvals', 'open_reviews', 'active_notices', 'recent_logs']:
+            assert key in body
+
+
+def test_ui_static_exposes_design_views_and_no_run_buttons(tmp_path):
     with client(tmp_path) as c:
         js = c.get('/static/app.js')
         assert js.status_code == 200
@@ -113,9 +190,18 @@ def test_ui_static_exposes_record_detail_views_and_no_run_buttons(tmp_path):
         assert 'openMessage' in body
         assert 'openTask' in body
         assert 'openApproval' in body
+        assert 'openReview' in body
+        assert 'openNotice' in body
         assert 'Full body' in body
         assert 'Full description' in body
         assert 'Proposed command / action text' in body
-        assert 'Copy text' in body
+        assert 'Safety warning: Approval records permission only' in body
         assert 'Run command' not in body
         assert 'Run service' not in body
+        assert 'execute this command' in body
+
+        html = c.get('/')
+        assert html.status_code == 200
+        assert 'Reviews' in html.text
+        assert 'Notices' in html.text
+        assert 'Services' in html.text
