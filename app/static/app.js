@@ -7,14 +7,13 @@ const riskLevels = [
   'STATE-CHANGING / APPROVAL REQUIRED',
   'RESTORE-ONLY / HIGH RISK',
   'DESTRUCTIVE / EXPLICIT APPROVAL REQUIRED',
-  'AI-TO-AI PENDING',
   'WARNING',
   'REVIEW',
   'BUILD / UI',
   'UNKNOWN / NEEDS REVIEW'
 ];
 const participants = ['Cameron', 'Nova', 'Mira', 'Hermes', 'OpenClaw', 'Nora', 'BookStack', 'Uptime Kuma', 'System'];
-const messageStatuses = ['unread','open','pending_approval','delivered','acknowledged','completed','archived'];
+const messageStatuses = ['draft','pending_approval','delivered','acknowledged','completed','archived','rejected'];
 const taskStatuses = ['open','in_progress','blocked','completed','archived','cancelled'];
 const approvalStatuses = ['pending','approved','rejected','archived','cancelled'];
 const reviewStatuses = ['open','in_progress','completed','archived','cancelled'];
@@ -76,7 +75,7 @@ async function pageMessages() {
       <input name="subject" placeholder="Subject" required>
       ${select('risk_level', riskLevels, 'DOCUMENTATION ONLY')}
       <textarea name="body" placeholder="Message body" required></textarea>
-      ${select('status', messageStatuses, 'unread')}
+      ${select('status', messageStatuses, 'delivered')}
       <button>+ New Message</button>
     </form>
     <div class="command-layout">
@@ -199,6 +198,7 @@ async function createNotice(event) { event.preventDefault(); await api('/notices
 async function patchNotice(id, status) { await api(`/notices/${id}`, {method:'PATCH', body: JSON.stringify({status})}); openNotice(id); }
 
 async function pageServices() { const items = await api('/services'); page('Services', 'Internal systems and applications that NexusAI tracks or receives notices from.', table(items, [{label:'Name', key:'name'},{label:'Type', key:'service_type'},{label:'URL', key:'url'},{label:'Host', key:'host'},{label:'Notes', key:'notes'},{label:'Active', render:i=> i.is_active ? 'yes' : 'no'}])); }
+async function pageConversations() { const items = await api('/conversations'); page('Conversations', 'Conversation threads group related messages and enforce max-turn safety limits.', table(items, [{label:'ID', key:'id'},{label:'Title', key:'title'},{label:'Status', render:i=>statusPill(i.status)},{label:'Created By', key:'created_by'},{label:'Turns', render:i=>`${esc(i.turn_count)} / ${esc(i.max_turns)}`},{label:'Summary', render:i=>esc(truncate(i.summary || ''))}])); }
 async function pageParticipants() { const items = await api('/participants'); page('Participants', 'Humans, AI assistants, services, and system identities that create, receive, or are assigned NexusAI records.', table(items, [{label:'Display Name', key:'display_name'},{label:'Type', key:'participant_type'},{label:'Role', key:'role_description'},{label:'Active', render:i=> i.is_active ? 'yes' : 'no'}])); }
 async function pageLogs() { const items = await api('/logs'); page('Action Log', 'Append-only audit history. Meaningful activity inside NexusAI creates a log entry.', table(items, [{label:'Time', key:'timestamp'},{label:'Actor', key:'actor'},{label:'Action', key:'action_type'},{label:'Entity', render:i=>`${esc(i.target_type)} #${esc(i.target_id ?? '')}`},{label:'Summary', key:'summary'}])); }
 async function patchStatus(type, id, status) { await api(`/${type}/${id}`, {method:'PATCH', body: JSON.stringify({status})}); route(); }
@@ -207,6 +207,7 @@ async function route() {
   try {
     const path = window.location.pathname;
     if (path === '/messages') return pageMessages();
+    if (path === '/conversations') return pageConversations();
     if (path === '/tasks') return pageTasks();
     if (path === '/approvals') return pageApprovals();
     if (path === '/reviews') return pageReviews();

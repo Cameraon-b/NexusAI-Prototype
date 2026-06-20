@@ -14,11 +14,17 @@ from .models import (
     ApprovalCreate,
     ApprovalOut,
     ApprovalPatch,
+    AgentInboxOut,
+    ConversationCreate,
+    ConversationOut,
+    ConversationPatch,
     DashboardOut,
     LogOut,
     MessageCreate,
     MessageOut,
     MessagePatch,
+    MessageReadCreate,
+    MessageReplyCreate,
     NoticeCreate,
     NoticeOut,
     NoticePatch,
@@ -76,13 +82,16 @@ def fetch_one(sql: str, params: tuple[Any, ...]) -> dict[str, Any]:
 def message_select(where: str = "", params: tuple[Any, ...] = (), limit: int | None = None) -> list[dict[str, Any]]:
     sql = """
         SELECT m.id, ps.display_name AS "from", pr.display_name AS "to", m.subject, m.body,
-               rl.name AS risk_level, m.status, m.requires_approval,
+               rl.name AS risk_level, rlr.name AS requested_risk_level,
+               m.conversation_id, m.parent_message_id,
+               m.status, m.requires_approval,
                COALESCE(pa.display_name, '') AS approved_by, COALESCE(m.approved_at, '') AS approved_at,
                COALESCE(mr.delivery_status, '') AS delivery_status,
                m.created_at, m.updated_at
         FROM messages m
         JOIN participants ps ON ps.id = m.sender_id
         LEFT JOIN risk_levels rl ON rl.id = m.risk_level_id
+        LEFT JOIN risk_levels rlr ON rlr.id = m.requested_risk_level_id
         LEFT JOIN message_recipients mr ON mr.message_id = m.id
         LEFT JOIN participants pr ON pr.id = mr.recipient_id
         LEFT JOIN participants pa ON pa.id = m.approved_by_id
@@ -182,6 +191,23 @@ def notice_select(where: str = "", params: tuple[Any, ...] = (), limit: int | No
         return rows_to_dicts(conn.execute(sql, params).fetchall())
 
 
+def conversation_select(where: str = "", params: tuple[Any, ...] = (), limit: int | None = None) -> list[dict[str, Any]]:
+    sql = """
+        SELECT c.id, c.title, c.status, COALESCE(p.display_name, '') AS created_by,
+               c.max_turns, c.turn_count, COALESCE(c.summary, '') AS summary,
+               c.created_at, c.updated_at, COALESCE(c.completed_at, '') AS completed_at
+        FROM conversations c
+        LEFT JOIN participants p ON p.id = c.created_by_id
+    """
+    if where:
+        sql += f" WHERE {where}"
+    sql += " ORDER BY c.created_at DESC, c.id DESC"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    with connect() as conn:
+        return rows_to_dicts(conn.execute(sql, params).fetchall())
+
+
 def log_select(limit: int = 200) -> list[dict[str, Any]]:
     with connect() as conn:
         rows = rows_to_dicts(
@@ -208,7 +234,7 @@ def index() -> FileResponse:
 
 @app.get("/{page_name}", include_in_schema=False)
 def ui_page(page_name: str) -> FileResponse:
-    allowed = {"messages", "tasks", "approvals", "reviews", "notices", "agents", "participants", "logs", "services"}
+    allowed = {"messages", "tasks", "approvals", "reviews", "notices", "agents", "participants", "logs", "services", "conversations"}
     if page_name not in allowed:
         raise HTTPException(status_code=404, detail="Not found")
     return FileResponse(STATIC_DIR / "index.html")
@@ -222,7 +248,7 @@ def health() -> dict[str, str]:
 @app.get("/api/dashboard", response_model=DashboardOut)
 def dashboard(_: None = Depends(require_local_password)) -> dict[str, Any]:
     return {
-        "open_messages": message_select("m.status IN ('unread','open','delivered')", limit=10),
+        "open_messages": message_select("m.status IN ('delivered','acknowledged')", limit=10),
         "open_tasks": task_select("t.status IN ('open','in_progress','blocked')", limit=10),
         "pending_approvals": approval_select("a.status = 'pending'", limit=10),
         "open_reviews": review_select("r.status IN ('open','in_progress')", limit=10),
@@ -248,6 +274,61 @@ def risk_levels(_: None = Depends(require_local_password)) -> list[dict[str, Any
         return rows_to_dicts(conn.execute("SELECT * FROM risk_levels ORDER BY sort_order ASC, id ASC").fetchall())
 
 
+@app.get("/api/conversations", response_model=list[ConversationOut])
+def conversations(_: None = Depends(require_local_password)) -> list[dict[str, Any]]:
+    return conversation_select()
+
+
+@app.get("/api/conversations/{conversation_id}", response_model=ConversationOut)
+def conversation(conversation_id: int, _: None = Depends(require_local_password)) -> dict[str, Any]:
+    rows = conversation_select("c.id = ?", (conversation_id,), 1)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return rows[0]
+
+
+@app.get("/api/conversations/{conversation_id}/messages", response_model=list[MessageOut])
+def conversation_messages(conversation_id: int, _: None = Depends(require_local_password)) -> list[dict[str, Any]]:
+    if not conversation_select("c.id = ?", (conversation_id,), 1):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return message_select("m.conversation_id = ?", (conversation_id,))
+
+
+@app.post("/api/conversations", response_model=ConversationOut, status_code=201)
+def create_conversation(payload: ConversationCreate, _: None = Depends(require_local_password)) -> dict[str, Any]:
+    with connect() as conn:
+        created_by = participant_id(conn, payload.created_by)
+        cur = conn.execute(
+            "INSERT INTO conversations (title, status, created_by_id, max_turns, summary) VALUES (?, ?, ?, ?, ?)",
+            (payload.title, payload.status.value, created_by, payload.max_turns, payload.summary),
+        )
+        item_id = int(cur.lastrowid)
+        log_action(conn, created_by, "create", "conversation", item_id, f"Conversation created: {payload.title}")
+    return conversation(item_id)
+
+
+@app.patch("/api/conversations/{conversation_id}", response_model=ConversationOut)
+def patch_conversation(conversation_id: int, payload: ConversationPatch, _: None = Depends(require_local_password)) -> dict[str, Any]:
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        return conversation(conversation_id)
+    with connect() as conn:
+        if not conn.execute("SELECT id FROM conversations WHERE id=?", (conversation_id,)).fetchone():
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        set_parts, values = [], []
+        for key, value in updates.items():
+            if hasattr(value, "value"):
+                value = value.value
+            set_parts.append(f"{key} = ?")
+            values.append(value)
+        if updates.get("status") in {"completed", "archived"}:
+            set_parts.append("completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)")
+        values.append(conversation_id)
+        conn.execute(f"UPDATE conversations SET {', '.join(set_parts)} WHERE id = ?", values)
+        log_action(conn, "System", "update", "conversation", conversation_id, f"Conversation updated: {conversation_id}")
+    return conversation(conversation_id)
+
+
 @app.get("/api/messages", response_model=list[MessageOut])
 def messages(_: None = Depends(require_local_password)) -> list[dict[str, Any]]:
     return message_select()
@@ -266,18 +347,35 @@ def create_message(payload: MessageCreate, _: None = Depends(require_local_passw
     with connect() as conn:
         sender = participant_id(conn, payload.from_)
         recipient = participant_id(conn, payload.to)
-        is_ai_to_ai = payload.from_.lower() not in {"cameron", "system"} and payload.to.lower() not in {"cameron", "system"}
-        requires_approval = payload.requires_approval or is_ai_to_ai
+        sender_type = conn.execute("SELECT participant_type FROM participants WHERE id=?", (sender,)).fetchone()["participant_type"]
+        recipient_type = conn.execute("SELECT participant_type FROM participants WHERE id=?", (recipient,)).fetchone()["participant_type"]
+        is_ai_to_ai = sender_type in {"ai", "agent_runtime"} and recipient_type in {"ai", "agent_runtime"}
+        requested_risk = payload.risk_level.value
+        requires_approval = payload.requires_approval or is_ai_to_ai or requested_risk == "UNKNOWN / NEEDS REVIEW"
         status_value = "pending_approval" if requires_approval else payload.status.value
+        delivery_status = "pending_approval" if requires_approval else "delivered"
+        conversation_id = payload.conversation_id
+        if conversation_id is None:
+            cur_conv = conn.execute(
+                "INSERT INTO conversations (title, created_by_id, max_turns, turn_count) VALUES (?, ?, 6, 1)",
+                (payload.subject, sender),
+            )
+            conversation_id = int(cur_conv.lastrowid)
+        else:
+            conv = conn.execute("SELECT * FROM conversations WHERE id=?", (conversation_id,)).fetchone()
+            if not conv:
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            if conv["status"] != "open":
+                raise HTTPException(status_code=409, detail="Conversation is not open")
+            conn.execute("UPDATE conversations SET turn_count = turn_count + 1 WHERE id=?", (conversation_id,))
         cur = conn.execute(
             """
-            INSERT INTO messages (sender_id, subject, body, risk_level_id, status, requires_approval)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO messages (sender_id, subject, body, risk_level_id, requested_risk_level_id, conversation_id, parent_message_id, status, requires_approval)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (sender, payload.subject, payload.body, risk_id(conn, "AI-TO-AI PENDING" if requires_approval else payload.risk_level.value), status_value, int(requires_approval)),
+            (sender, payload.subject, payload.body, risk_id(conn, requested_risk), risk_id(conn, requested_risk), conversation_id, payload.parent_message_id, status_value, int(requires_approval)),
         )
         item_id = int(cur.lastrowid)
-        delivery_status = "pending_approval" if requires_approval else "delivered"
         conn.execute(
             "INSERT INTO message_recipients (message_id, recipient_id, delivery_status, delivered_at) VALUES (?, ?, ?, CASE WHEN ? THEN NULL ELSE CURRENT_TIMESTAMP END)",
             (item_id, recipient, delivery_status, int(requires_approval)),
@@ -285,14 +383,15 @@ def create_message(payload: MessageCreate, _: None = Depends(require_local_passw
         log_action(conn, sender, "create", "message", item_id, f"Message to {payload.to}: {payload.subject}")
         if requires_approval:
             cameron = participant_id(conn, "Cameron")
+            reason = "AI-to-AI messages require Cameron approval by default." if is_ai_to_ai else "Message risk requires approval."
             approval = conn.execute(
                 """
                 INSERT INTO approval_requests (requested_by_id, requested_for_id, target_type, target_id, action_type, action_summary, reason, risk_level_id, status)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (sender, cameron, "message", item_id, "ai_to_ai_delivery", f"Approve AI-to-AI message delivery: {payload.subject}", "AI-to-AI messages require Cameron approval by default.", risk_id(conn, "AI-TO-AI PENDING"), "pending"),
+                (sender, cameron, "message", item_id, "ai_to_ai_delivery" if is_ai_to_ai else "message_delivery", f"Approve message delivery: {payload.subject}", reason, risk_id(conn, requested_risk), "pending"),
             )
-            log_action(conn, sender, "create", "approval", int(approval.lastrowid), f"AI-to-AI delivery approval requested for message #{item_id}.")
+            log_action(conn, sender, "create", "approval", int(approval.lastrowid), f"Message delivery approval requested for message #{item_id}.")
     return message(item_id)
 
 
@@ -329,6 +428,99 @@ def patch_message(message_id: int, payload: MessagePatch, _: None = Depends(requ
             conn.execute(f"UPDATE messages SET {', '.join(set_parts)} WHERE id = ?", values)
         log_action(conn, row["sender_id"], "update", "message", message_id, "Updated message status/detail.")
     return message(message_id)
+
+
+@app.get("/api/agent-inbox/{participant_name}", response_model=AgentInboxOut)
+def agent_inbox(participant_name: str, limit: int = 1, debug_log_empty: bool = False, _: None = Depends(require_local_password)) -> dict[str, Any]:
+    limit = max(1, min(int(limit), 5))
+    with connect() as conn:
+        pid = participant_id(conn, participant_name)
+        rows = rows_to_dicts(conn.execute(
+            """
+            SELECT m.id
+            FROM messages m
+            JOIN message_recipients mr ON mr.message_id = m.id
+            WHERE mr.recipient_id = ?
+              AND mr.delivery_status = 'delivered'
+              AND m.status = 'delivered'
+              AND (m.requires_approval = 0 OR (m.approved_by_id IS NOT NULL AND m.approved_at IS NOT NULL))
+            ORDER BY m.created_at ASC, m.id ASC
+            LIMIT ?
+            """,
+            (pid, limit),
+        ).fetchall())
+        if rows or debug_log_empty:
+            log_action(conn, pid, "check_inbox", "participant", pid, f"{participant_name} checked inbox. Returned {len(rows)} message(s).")
+    messages = [message(row["id"]) for row in rows]
+    return {"participant": participant_name, "limit": limit, "messages": messages}
+
+
+@app.post("/api/messages/{message_id}/read")
+def read_message(message_id: int, payload: MessageReadCreate, _: None = Depends(require_local_password)) -> dict[str, Any]:
+    with connect() as conn:
+        pid = participant_id(conn, payload.participant)
+        row = conn.execute("SELECT * FROM message_recipients WHERE message_id=? AND recipient_id=?", (message_id, pid)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Recipient message not found")
+        if row["delivery_status"] != "delivered":
+            raise HTTPException(status_code=409, detail="Message is not delivered")
+        conn.execute("UPDATE message_recipients SET delivery_status='read', read_at=COALESCE(read_at, CURRENT_TIMESTAMP) WHERE message_id=? AND recipient_id=?", (message_id, pid))
+        log_action(conn, pid, "read", "message", message_id, f"{payload.participant} read message #{message_id}.")
+        updated = conn.execute("SELECT * FROM message_recipients WHERE message_id=? AND recipient_id=?", (message_id, pid)).fetchone()
+        return {"message_id": message_id, "participant": payload.participant, "delivery_status": updated["delivery_status"], "read_at": updated["read_at"], "acknowledged_at": updated["acknowledged_at"]}
+
+
+@app.post("/api/messages/{message_id}/acknowledge")
+def acknowledge_message(message_id: int, payload: MessageReadCreate, _: None = Depends(require_local_password)) -> dict[str, Any]:
+    with connect() as conn:
+        pid = participant_id(conn, payload.participant)
+        row = conn.execute("SELECT * FROM message_recipients WHERE message_id=? AND recipient_id=?", (message_id, pid)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Recipient message not found")
+        if row["delivery_status"] not in {"delivered", "read", "acknowledged"}:
+            raise HTTPException(status_code=409, detail="Message is not delivered")
+        conn.execute("UPDATE message_recipients SET delivery_status='acknowledged', read_at=COALESCE(read_at, CURRENT_TIMESTAMP), acknowledged_at=CURRENT_TIMESTAMP WHERE message_id=? AND recipient_id=?", (message_id, pid))
+        conn.execute("UPDATE messages SET status='acknowledged' WHERE id=?", (message_id,))
+        log_action(conn, pid, "acknowledge", "message", message_id, f"{payload.participant} acknowledged message #{message_id}.")
+        updated = conn.execute("SELECT * FROM message_recipients WHERE message_id=? AND recipient_id=?", (message_id, pid)).fetchone()
+        return {"message_id": message_id, "participant": payload.participant, "delivery_status": updated["delivery_status"], "read_at": updated["read_at"], "acknowledged_at": updated["acknowledged_at"]}
+
+
+@app.post("/api/messages/{message_id}/reply", response_model=MessageOut, status_code=201)
+def reply_to_message(message_id: int, payload: MessageReplyCreate, _: None = Depends(require_local_password)) -> dict[str, Any]:
+    parent_rows = message_select("m.id = ?", (message_id,), 1)
+    if not parent_rows:
+        raise HTTPException(status_code=404, detail="Message not found")
+    parent = parent_rows[0]
+    if parent.get("conversation_id") is None:
+        raise HTTPException(status_code=409, detail="Message has no conversation")
+    with connect() as conn:
+        conv = conn.execute("SELECT * FROM conversations WHERE id=?", (parent["conversation_id"],)).fetchone()
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        if conv["status"] != "open":
+            raise HTTPException(status_code=409, detail="Conversation is not open")
+        if int(conv["turn_count"]) >= int(conv["max_turns"]):
+            conn.execute("UPDATE conversations SET status='paused' WHERE id=?", (conv["id"],))
+            log_action(conn, payload.from_, "max_turns_reached", "conversation", conv["id"], f"Conversation #{conv['id']} reached max_turns and was paused.")
+            conn.commit()
+            raise HTTPException(status_code=409, detail="Conversation has reached max_turns and is paused for Cameron review")
+    subject = parent["subject"] if parent["subject"].lower().startswith("re:") else f"RE: {parent['subject']}"
+    reply_payload = MessageCreate(
+        **{
+            "from": payload.from_,
+            "to": parent["from"],
+            "subject": subject,
+            "body": payload.body,
+            "risk_level": payload.risk_level,
+            "conversation_id": parent["conversation_id"],
+            "parent_message_id": message_id,
+        }
+    )
+    created = create_message(reply_payload)
+    with connect() as conn:
+        log_action(conn, payload.from_, "create_reply", "message", created["id"], f"{payload.from_} replied to message #{message_id} in conversation #{parent['conversation_id']}.")
+    return created
 
 
 @app.get("/api/tasks", response_model=list[TaskOut])
@@ -449,14 +641,24 @@ def patch_approval(approval_id: int, payload: ApprovalPatch, _: None = Depends(r
             set_parts.append(f"{col} = ?")
             values.append(value)
         if updates.get("status") in {"approved", "rejected"}:
-            set_parts.append("decided_at = COALESCE(decided_at, ?)")
-            values.append(approval_timestamp("approved"))
+            set_parts.append("decided_at = COALESCE(decided_at, CURRENT_TIMESTAMP)")
         values.append(approval_id)
         conn.execute(f"UPDATE approval_requests SET {', '.join(set_parts)} WHERE id = ?", values)
-        patched = conn.execute("SELECT status, target_type, target_id, decided_by_id FROM approval_requests WHERE id = ?", (approval_id,)).fetchone()
+        patched = conn.execute("SELECT status, target_type, target_id, requested_by_id, decided_by_id FROM approval_requests WHERE id = ?", (approval_id,)).fetchone()
+        if patched["status"] in {"approved", "rejected"}:
+            decider = conn.execute("SELECT display_name FROM participants WHERE id=?", (patched["decided_by_id"],)).fetchone() if patched["decided_by_id"] else None
+            if not decider or decider["display_name"] != "Cameron":
+                raise HTTPException(status_code=403, detail="Only Cameron can approve or reject deliveries in v1")
+            if patched["decided_by_id"] == patched["requested_by_id"]:
+                raise HTTPException(status_code=403, detail="Agents cannot approve their own messages")
         if patched["status"] == "approved" and patched["target_type"] == "message" and patched["target_id"]:
-            conn.execute("UPDATE messages SET status='delivered', requires_approval=0, approved_by_id=?, approved_at=CURRENT_TIMESTAMP WHERE id=?", (patched["decided_by_id"], patched["target_id"]))
+            conn.execute("UPDATE messages SET status='delivered', approved_by_id=?, approved_at=CURRENT_TIMESTAMP WHERE id=?", (patched["decided_by_id"], patched["target_id"]))
             conn.execute("UPDATE message_recipients SET delivery_status='delivered', delivered_at=CURRENT_TIMESTAMP WHERE message_id=?", (patched["target_id"],))
+            log_action(conn, patched["decided_by_id"], "approve_delivery", "message", patched["target_id"], f"Cameron approved delivery for message #{patched['target_id']}.")
+        elif patched["status"] == "rejected" and patched["target_type"] == "message" and patched["target_id"]:
+            conn.execute("UPDATE messages SET status='rejected' WHERE id=?", (patched["target_id"],))
+            conn.execute("UPDATE message_recipients SET delivery_status='rejected' WHERE message_id=?", (patched["target_id"],))
+            log_action(conn, patched["decided_by_id"], "reject_delivery", "message", patched["target_id"], f"Cameron rejected delivery for message #{patched['target_id']}.")
         log_action(conn, row["requested_by_id"], "update", "approval", approval_id, "Approval decision/status recorded only; no command executed.")
     return approval(approval_id)
 

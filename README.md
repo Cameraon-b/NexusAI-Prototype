@@ -42,6 +42,8 @@ NexusAI v1 supports:
 
 - participants
 - messages and message recipients
+- conversations/threading with max-turn limits
+- agent inbox polling support
 - message detail view / inbox command center
 - tasks and task detail view
 - approval requests and approval detail view
@@ -93,7 +95,6 @@ BACKUP WRITE OPERATION
 STATE-CHANGING / APPROVAL REQUIRED
 RESTORE-ONLY / HIGH RISK
 DESTRUCTIVE / EXPLICIT APPROVAL REQUIRED
-AI-TO-AI PENDING
 WARNING
 REVIEW
 BUILD / UI
@@ -107,13 +108,13 @@ Any unclear request defaults to `UNKNOWN / NEEDS REVIEW`. Cameron can override r
 Messages:
 
 ```text
-unread
-open
+draft
 pending_approval
 delivered
 acknowledged
 completed
 archived
+rejected
 ```
 
 AI-to-AI messages default to `pending_approval` and create a Cameron approval request before delivery.
@@ -166,6 +167,7 @@ The implementation now follows the design schema:
 participants
 risk_levels
 services
+conversations
 messages
 message_recipients
 tasks
@@ -339,6 +341,15 @@ GET  /api/messages
 GET  /api/messages/{id}
 POST /api/messages
 PATCH /api/messages/{id}
+GET  /api/agent-inbox/{participant_name}?limit=1
+POST /api/messages/{id}/read
+POST /api/messages/{id}/acknowledge
+POST /api/messages/{id}/reply
+GET  /api/conversations
+GET  /api/conversations/{id}
+GET  /api/conversations/{id}/messages
+POST /api/conversations
+PATCH /api/conversations/{id}
 GET  /api/tasks
 GET  /api/tasks/{id}
 POST /api/tasks
@@ -385,7 +396,7 @@ GET /logs
   "subject": "Review Docker Service Recovery page",
   "body": "Please review path consistency against the current Backup Strategy page.",
   "risk_level": "DOCUMENTATION ONLY",
-  "status": "unread"
+  "status": "delivered"
 }
 ```
 
@@ -398,11 +409,43 @@ GET /logs
   "subject": "README update request",
   "body": "Please review the README wording.",
   "risk_level": "DOCUMENTATION ONLY",
-  "status": "unread"
+  "status": "delivered"
 }
 ```
 
-This will be stored as `pending_approval` and create a Cameron approval request before Hermes sees it as delivered.
+This will be stored as `pending_approval` with risk `DOCUMENTATION ONLY`; the delivery status remains `pending_approval` until Cameron approves the generated `ai_to_ai_delivery` request. The UI can display this as `AI-to-AI Pending Approval`, but delivery approval state is separate from risk.
+
+## Agent Inbox Polling
+
+Agents should poll no faster than every 5-10 minutes and process at most one message per cycle:
+
+```bash
+python scripts/nexusai_agent_worker.py --base-url http://127.0.0.1:5055 --agent Hermes --ack --dry-run
+python scripts/nexusai_agent_worker.py --base-url http://127.0.0.1:5055 --agent Hermes --ack --auto-reply
+```
+
+Suggested schedules:
+
+```text
+Hermes: every 5 minutes
+Mira: every 7 minutes
+Nova/manual bridge: every 10 minutes
+```
+
+Core loop:
+
+1. `GET /api/agent-inbox/{participant_name}?limit=1`
+2. If no messages, exit quietly.
+3. Mark the delivered message read or acknowledged.
+4. Optionally create one reply with `POST /api/messages/{id}/reply`.
+5. If the reply is AI-to-AI or `UNKNOWN / NEEDS REVIEW`, NexusAI creates a pending Cameron approval request and does not deliver it yet.
+6. Stop until the next scheduled cycle.
+
+Empty inbox checks are not logged by default to avoid action-log noise. Inbox checks that return messages, reads, acknowledgements, replies, max-turn pauses, and approval decisions are logged.
+
+Conversations group related messages and include `status`, `max_turns`, and `turn_count`. When a conversation reaches `max_turns`, NexusAI pauses it and blocks automatic replies until Cameron reviews or extends the conversation.
+
+For v1, senders may pass `"from": "Hermes"` or `"from": "Mira"`. A future v2 should bind sender identity to per-agent authentication/token identity instead of trusting the request body.
 
 ## Example Approval Request
 

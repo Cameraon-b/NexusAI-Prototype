@@ -22,11 +22,18 @@ class RiskLevel(StrEnum):
 
 
 class MessageStatus(StrEnum):
-    unread = "unread"
-    open = "open"
+    draft = "draft"
     pending_approval = "pending_approval"
     delivered = "delivered"
     acknowledged = "acknowledged"
+    completed = "completed"
+    archived = "archived"
+    rejected = "rejected"
+
+
+class ConversationStatus(StrEnum):
+    open = "open"
+    paused = "paused"
     completed = "completed"
     archived = "archived"
 
@@ -88,9 +95,23 @@ class MessageCreate(BaseModel):
     to: str
     subject: str
     body: str
-    risk_level: RiskLevel = RiskLevel.unknown
-    status: MessageStatus = MessageStatus.unread
+    risk_level: RiskLevel = RiskLevel.documentation_only
+    status: MessageStatus = MessageStatus.delivered
     requires_approval: bool = False
+    conversation_id: Optional[int] = None
+    parent_message_id: Optional[int] = None
+
+
+class MessageReadCreate(BaseModel):
+    participant: str
+
+
+class MessageReplyCreate(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_: str = Field(alias="from")
+    body: str
+    risk_level: RiskLevel = RiskLevel.documentation_only
 
 
 class MessagePatch(BaseModel):
@@ -114,6 +135,9 @@ class MessageOut(BaseModel):
     subject: str
     body: str
     risk_level: RiskLevel
+    requested_risk_level: Optional[RiskLevel] = None
+    conversation_id: Optional[int] = None
+    parent_message_id: Optional[int] = None
     status: MessageStatus
     requires_approval: bool = False
     approved_by: str = ""
@@ -121,6 +145,40 @@ class MessageOut(BaseModel):
     delivery_status: str = ""
     created_at: str
     updated_at: str
+
+
+class ConversationCreate(BaseModel):
+    title: str
+    created_by: str = "System"
+    max_turns: int = 6
+    summary: str = ""
+    status: ConversationStatus = ConversationStatus.open
+
+
+class ConversationPatch(BaseModel):
+    title: Optional[str] = None
+    status: Optional[ConversationStatus] = None
+    max_turns: Optional[int] = None
+    summary: Optional[str] = None
+
+
+class ConversationOut(BaseModel):
+    id: int
+    title: str
+    status: ConversationStatus
+    created_by: str = ""
+    max_turns: int
+    turn_count: int
+    summary: str = ""
+    created_at: str
+    updated_at: str
+    completed_at: str = ""
+
+
+class AgentInboxOut(BaseModel):
+    participant: str
+    limit: int
+    messages: list[MessageOut]
 
 
 class TaskCreate(BaseModel):

@@ -27,7 +27,6 @@ RISK_LEVELS = [
     ("STATE-CHANGING / APPROVAL REQUIRED", "Changes service state and requires Cameron approval."),
     ("RESTORE-ONLY / HIGH RISK", "Restore path or high-risk recovery operation."),
     ("DESTRUCTIVE / EXPLICIT APPROVAL REQUIRED", "Destructive action requiring explicit human approval."),
-    ("AI-TO-AI PENDING", "AI-to-AI delivery held until Cameron approval."),
     ("WARNING", "Service/system warning requiring attention."),
     ("REVIEW", "Review request or reviewer note."),
     ("BUILD / UI", "Build or UI implementation work."),
@@ -40,11 +39,13 @@ SERVICES = [
     ("Uptime Kuma", "monitoring", "", "Nora", "Monitoring and alert source."),
 ]
 
-MESSAGE_STATUSES = ["unread", "open", "pending_approval", "delivered", "acknowledged", "completed", "archived"]
+MESSAGE_STATUSES = ["draft", "pending_approval", "delivered", "acknowledged", "completed", "archived", "rejected"]
 TASK_STATUSES = ["open", "in_progress", "blocked", "completed", "archived", "cancelled"]
 APPROVAL_STATUSES = ["pending", "approved", "rejected", "archived", "cancelled"]
 REVIEW_STATUSES = ["open", "in_progress", "completed", "archived", "cancelled"]
 NOTICE_STATUSES = ["active", "acknowledged", "resolved", "archived"]
+CONVERSATION_STATUSES = ["open", "paused", "completed", "archived"]
+DELIVERY_STATUSES = ["pending_approval", "delivered", "read", "acknowledged", "archived", "rejected"]
 
 
 def db_path() -> str:
@@ -102,6 +103,24 @@ def archive_legacy_schema(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} RENAME TO {target}")
 
 
+def ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    if table_exists(conn, table) and column not in table_columns(conn, table):
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def migrate_current_schema(conn: sqlite3.Connection) -> None:
+    """Add vNext columns to existing designed-schema DBs without dropping data.
+
+    Earlier v0.2 databases used message delivery state as risk in some cases and
+    lacked conversation columns. This migration keeps records intact and adds the
+    new fields required for agent inbox polling.
+    """
+    if table_exists(conn, "messages"):
+        ensure_column(conn, "messages", "requested_risk_level_id", "INTEGER REFERENCES risk_levels(id)")
+        ensure_column(conn, "messages", "conversation_id", "INTEGER REFERENCES conversations(id)")
+        ensure_column(conn, "messages", "parent_message_id", "INTEGER REFERENCES messages(id)")
+
+
 def init_db() -> None:
     with connect() as conn:
         archive_legacy_schema(conn)
@@ -137,19 +156,38 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_by_id INTEGER REFERENCES participants(id),
+                max_turns INTEGER NOT NULL DEFAULT 6,
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                summary TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TEXT,
+                CHECK (status IN ('open','paused','completed','archived')),
+                CHECK (max_turns >= 1),
+                CHECK (turn_count >= 0)
+            );
+
             CREATE TABLE IF NOT EXISTS messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender_id INTEGER NOT NULL REFERENCES participants(id),
                 subject TEXT NOT NULL,
                 body TEXT NOT NULL,
                 risk_level_id INTEGER REFERENCES risk_levels(id),
-                status TEXT NOT NULL DEFAULT 'unread',
+                requested_risk_level_id INTEGER REFERENCES risk_levels(id),
+                conversation_id INTEGER REFERENCES conversations(id),
+                parent_message_id INTEGER REFERENCES messages(id),
+                status TEXT NOT NULL DEFAULT 'delivered',
                 requires_approval INTEGER NOT NULL DEFAULT 0,
                 approved_by_id INTEGER REFERENCES participants(id),
                 approved_at TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                CHECK (status IN ('unread','open','pending_approval','delivered','acknowledged','completed','archived'))
+                CHECK (status IN ('draft','pending_approval','delivered','acknowledged','completed','archived','rejected'))
             );
 
             CREATE TABLE IF NOT EXISTS message_recipients (
@@ -160,7 +198,8 @@ def init_db() -> None:
                 delivered_at TEXT,
                 read_at TEXT,
                 acknowledged_at TEXT,
-                UNIQUE(message_id, recipient_id)
+                UNIQUE(message_id, recipient_id),
+                CHECK (delivery_status IN ('pending_approval','delivered','read','acknowledged','archived','rejected'))
             );
 
             CREATE TABLE IF NOT EXISTS tasks (
@@ -250,6 +289,9 @@ def init_db() -> None:
             CREATE TRIGGER IF NOT EXISTS services_updated_at AFTER UPDATE ON services BEGIN
                 UPDATE services SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
             END;
+            CREATE TRIGGER IF NOT EXISTS conversations_updated_at AFTER UPDATE ON conversations BEGIN
+                UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
+            END;
             CREATE TRIGGER IF NOT EXISTS messages_updated_at AFTER UPDATE ON messages BEGIN
                 UPDATE messages SET updated_at = CURRENT_TIMESTAMP WHERE id = NEW.id;
             END;
@@ -267,6 +309,7 @@ def init_db() -> None:
             END;
             """
         )
+        migrate_current_schema(conn)
         seed_reference_data(conn)
         seed_examples(conn)
 
@@ -377,7 +420,7 @@ def seed_examples(conn: sqlite3.Connection) -> None:
                 "Docker Recovery page updated",
                 "I updated the Docker Service Recovery page and aligned the backup paths with the current Backup Strategy layout. Please review the path references and confirm the restore-only warnings are clear.",
                 risk_id(conn, "DOCUMENTATION ONLY"),
-                "unread",
+                "delivered",
                 0,
             ),
         )

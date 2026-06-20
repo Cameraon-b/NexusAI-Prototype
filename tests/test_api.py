@@ -30,7 +30,7 @@ def test_participants_and_reference_data_seeded(tmp_path):
             assert name in display_names
 
         risks = [r['name'] for r in c.get('/api/risk-levels').json()]
-        assert 'AI-TO-AI PENDING' in risks
+        assert 'AI-TO-AI PENDING' not in risks
         assert 'BUILD / UI' in risks
 
 
@@ -42,7 +42,7 @@ def test_create_human_message_and_logs_action(tmp_path):
             'subject': 'Review Docker Service Recovery page',
             'body': 'Please review path consistency against the current Backup Strategy page.',
             'risk_level': 'DOCUMENTATION ONLY',
-            'status': 'unread',
+            'status': 'delivered',
         }
         res = c.post('/api/messages', json=payload)
         assert res.status_code == 201
@@ -51,7 +51,7 @@ def test_create_human_message_and_logs_action(tmp_path):
         assert msg['from'] == 'Mira'
         assert msg['to'] == 'Cameron'
         assert msg['risk_level'] == 'DOCUMENTATION ONLY'
-        assert msg['status'] == 'unread'
+        assert msg['status'] == 'delivered'
         assert msg['requires_approval'] is False
 
         logs = c.get('/api/logs').json()
@@ -66,7 +66,7 @@ def test_ai_to_ai_message_requires_approval_and_approval_delivers(tmp_path):
             'subject': 'README update request',
             'body': 'Please review the README wording.',
             'risk_level': 'DOCUMENTATION ONLY',
-            'status': 'unread',
+            'status': 'delivered',
         })
         assert res.status_code == 201
         msg = res.json()
@@ -80,7 +80,10 @@ def test_ai_to_ai_message_requires_approval_and_approval_delivers(tmp_path):
         assert approved.status_code == 200
         delivered = c.get(f"/api/messages/{msg['id']}").json()
         assert delivered['status'] == 'delivered'
-        assert delivered['requires_approval'] is False
+        assert delivered['requires_approval'] is True
+        assert delivered['risk_level'] == 'DOCUMENTATION ONLY'
+        assert delivered['approved_by'] == 'Cameron'
+        assert delivered['approved_at']
 
 
 def test_create_and_patch_task(tmp_path):
@@ -180,6 +183,110 @@ def test_dashboard_matches_design_material_sections(tmp_path):
         body = dash.json()
         for key in ['open_messages', 'open_tasks', 'pending_approvals', 'open_reviews', 'active_notices', 'recent_logs']:
             assert key in body
+
+
+
+def test_agent_inbox_read_ack_reply_and_logs(tmp_path):
+    with client(tmp_path) as c:
+        msg = c.post('/api/messages', json={
+            'from': 'Cameron',
+            'to': 'Hermes',
+            'subject': 'Agent inbox smoke test',
+            'body': 'Please acknowledge this delivered message.',
+            'risk_level': 'DOCUMENTATION ONLY',
+            'status': 'delivered',
+        }).json()
+
+        inbox = c.get('/api/agent-inbox/Hermes?limit=1')
+        assert inbox.status_code == 200
+        assert inbox.json()['messages'][0]['id'] == msg['id']
+
+        read = c.post(f"/api/messages/{msg['id']}/read", json={'participant': 'Hermes'})
+        assert read.status_code == 200
+        assert read.json()['delivery_status'] == 'read'
+
+        ack = c.post(f"/api/messages/{msg['id']}/acknowledge", json={'participant': 'Hermes'})
+        assert ack.status_code == 200
+        assert ack.json()['delivery_status'] == 'acknowledged'
+
+        reply = c.post(f"/api/messages/{msg['id']}/reply", json={
+            'from': 'Hermes',
+            'body': 'Acknowledged. This is a documentation-only reply.',
+            'risk_level': 'DOCUMENTATION ONLY',
+        })
+        assert reply.status_code == 201
+        body = reply.json()
+        assert body['parent_message_id'] == msg['id']
+        assert body['conversation_id'] == msg['conversation_id']
+        assert body['status'] == 'delivered'  # human recipient, no AI-to-AI gate
+
+        logs = c.get('/api/logs').json()
+        actions = [l['action_type'] for l in logs]
+        assert 'check_inbox' in actions
+        assert 'read' in actions
+        assert 'acknowledge' in actions
+        assert 'create_reply' in actions
+
+
+def test_agent_inbox_hides_pending_ai_to_ai_until_cameron_approval(tmp_path):
+    with client(tmp_path) as c:
+        res = c.post('/api/messages', json={
+            'from': 'Hermes',
+            'to': 'Mira',
+            'subject': 'Pending approval inbox test',
+            'body': 'This should wait for Cameron approval.',
+            'risk_level': 'DOCUMENTATION ONLY',
+            'status': 'delivered',
+        })
+        assert res.status_code == 201
+        msg = res.json()
+        assert msg['risk_level'] == 'DOCUMENTATION ONLY'
+        assert msg['requested_risk_level'] == 'DOCUMENTATION ONLY'
+        assert msg['status'] == 'pending_approval'
+        assert msg['delivery_status'] == 'pending_approval'
+        assert c.get('/api/agent-inbox/Mira?limit=1').json()['messages'] == []
+
+        approval = next(a for a in c.get('/api/approvals').json() if a['target_id'] == msg['id'] and a['target_type'] == 'message')
+        approved = c.patch(f"/api/approvals/{approval['id']}", json={'status': 'approved', 'approved_by': 'Cameron'})
+        assert approved.status_code == 200
+        inbox = c.get('/api/agent-inbox/Mira?limit=1').json()
+        assert inbox['messages'][0]['id'] == msg['id']
+
+
+def test_cameron_rejection_marks_message_rejected(tmp_path):
+    with client(tmp_path) as c:
+        msg = c.post('/api/messages', json={
+            'from': 'Hermes',
+            'to': 'Mira',
+            'subject': 'Reject delivery test',
+            'body': 'This should be rejected.',
+            'risk_level': 'DOCUMENTATION ONLY',
+            'status': 'delivered',
+        }).json()
+        approval = next(a for a in c.get('/api/approvals').json() if a['target_id'] == msg['id'] and a['target_type'] == 'message')
+        rejected = c.patch(f"/api/approvals/{approval['id']}", json={'status': 'rejected', 'approved_by': 'Cameron', 'decision_notes': 'Not needed.'})
+        assert rejected.status_code == 200
+        fetched = c.get(f"/api/messages/{msg['id']}").json()
+        assert fetched['status'] == 'rejected'
+        assert fetched['delivery_status'] == 'rejected'
+        assert c.get('/api/agent-inbox/Mira?limit=1').json()['messages'] == []
+
+
+def test_conversation_max_turns_pauses_replies(tmp_path):
+    with client(tmp_path) as c:
+        conv = c.post('/api/conversations', json={'title': 'Short conversation', 'created_by': 'Cameron', 'max_turns': 1}).json()
+        msg = c.post('/api/messages', json={
+            'from': 'Cameron',
+            'to': 'Hermes',
+            'subject': 'One turn only',
+            'body': 'This consumes the only turn.',
+            'risk_level': 'DOCUMENTATION ONLY',
+            'status': 'delivered',
+            'conversation_id': conv['id'],
+        }).json()
+        blocked = c.post(f"/api/messages/{msg['id']}/reply", json={'from': 'Hermes', 'body': 'Should be blocked.'})
+        assert blocked.status_code == 409
+        assert c.get(f"/api/conversations/{conv['id']}").json()['status'] == 'paused'
 
 
 def test_ui_static_exposes_design_views_and_no_run_buttons(tmp_path):
