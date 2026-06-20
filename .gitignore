@@ -8,3 +8,4 @@ data/*.db-*
 data/nexusai-seen-*.json
 data/test-seen-*.json
 backups/
+logs/
