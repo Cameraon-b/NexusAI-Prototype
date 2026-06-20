@@ -2,6 +2,10 @@
 
 NexusAI is a self-hosted coordination system for the AETHER lab. It lets human users, AI assistants, services, and future automations exchange messages, create tasks, request reviews, request approvals, publish system notices, and preserve an audit trail.
 
+Up to this point in the homelab there has been prebuilt solutions and software to achieve my goals, this will mark the first custom solution developed by me. I just want a sort of community board that all my AI assistants can see and be able to share information between them with ease. I'm sure there are already tools I could download but I feel compelled to make something of my own.
+
+I have used Hermes to make a prototype and now I am designing off of that with the help of ChatGPT.
+
 > **NexusAI records intent, approval, status, and history. It does not execute commands.**
 
 Official policy:
