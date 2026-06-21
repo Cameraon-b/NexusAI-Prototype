@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.parse
 from typing import Any
@@ -22,6 +23,72 @@ DEFAULT_AUTO_REPLY = (
     "Acknowledged. I read your message. NexusAI remains a coordination, "
     "approval, messaging, and audit system only; no commands were executed."
 )
+AUTO_REPLY_MODES = ("ack-only", "template", "agent-bridge")
+SAFETY_KEYWORDS = (
+    "command",
+    "commands",
+    "shell",
+    "powershell",
+    "ssh",
+    "docker",
+    "compose",
+    "deploy",
+    "deployment",
+    "restart",
+    "restore",
+    "system change",
+    "state-changing",
+    "approval",
+    "approve",
+    "approved",
+)
+
+
+def compact_text(value: Any, max_chars: int = 220) -> str:
+    """Normalize message text for short deterministic replies."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def message_discusses_safety_topic(message: dict[str, Any]) -> bool:
+    """Return true when a contextual reply should include the short safety line."""
+    haystack = f"{message.get('subject', '')} {message.get('body', '')}".lower()
+    return any(keyword in haystack for keyword in SAFETY_KEYWORDS)
+
+
+def build_template_reply(message: dict[str, Any]) -> str:
+    """Build a short contextual reply without calling tools or claiming work."""
+    subject = compact_text(message.get("subject") or "No subject", 120)
+    body = compact_text(message.get("body") or "the message", 220)
+    body_fragment = re.sub(r"[.!?]+", ",", body).strip(" ,") or "the message"
+
+    sentences = [
+        f"Subject: {subject}.",
+        f"I read your note: \"{body_fragment}\".",
+        "My answer is to keep the next step scoped to the message topic and turn it into a clear NexusAI task or reply without claiming any work has already been performed.",
+        "Next checklist item: identify the owner, desired outcome, and any approval gate before moving this forward.",
+    ]
+    if message_discusses_safety_topic(message):
+        sentences.append("Safety: approval records permission only; it is not execution and does not execute commands or apply system changes.")
+    return " ".join(sentences)
+
+
+def build_auto_reply_body(message: dict[str, Any], mode: str, explicit_text: str = "") -> str:
+    """Return the reply body for the selected auto-reply mode."""
+    if mode == "ack-only":
+        return explicit_text or DEFAULT_AUTO_REPLY
+    if mode == "template":
+        if explicit_text:
+            return explicit_text
+        return build_template_reply(message)
+    if mode == "agent-bridge":
+        raise NotImplementedError(
+            "agent-bridge auto-reply mode is a placeholder for a future real agent/runtime bridge; "
+            "it does not execute commands or create a generated reply yet."
+        )
+    raise ValueError(f"Unsupported auto-reply mode: {mode}")
 
 
 def print_json(label: str, value: Any) -> None:
@@ -55,7 +122,16 @@ def build_parser() -> argparse.ArgumentParser:
         const=DEFAULT_AUTO_REPLY,
         default="",
         metavar="TEXT",
-        help="Create exactly one DOCUMENTATION ONLY reply. Optional TEXT overrides the default reply body.",
+        help=(
+            "Create exactly one DOCUMENTATION ONLY reply. Optional TEXT overrides the generated body "
+            "for ack-only/template modes."
+        ),
+    )
+    parser.add_argument(
+        "--auto-reply-mode",
+        choices=AUTO_REPLY_MODES,
+        default="ack-only",
+        help="Auto-reply behavior: ack-only keeps the generic acknowledgement; template builds a short contextual reply; agent-bridge is a future placeholder.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print intended actions without POSTing read/ack/reply changes")
     return parser
@@ -71,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Base URL: {os.environ['NEXUSAI_URL']}")
     print(f"Agent: {args.agent}")
     print(f"Dry run: {'yes' if args.dry_run else 'no'}")
+    print(f"Auto-reply mode: {args.auto_reply_mode}")
     print("Safety: no command execution; approval does not equal execution.")
 
     encoded_agent = urllib.parse.quote(args.agent)
@@ -102,9 +179,17 @@ def main(argv: list[str] | None = None) -> int:
             print_json("Acknowledged:", ack_result)
 
     if args.auto_reply:
+        explicit_reply_text = "" if args.auto_reply == DEFAULT_AUTO_REPLY else args.auto_reply
+        try:
+            reply_body = build_auto_reply_body(message, args.auto_reply_mode, explicit_reply_text)
+        except NotImplementedError as exc:
+            print(f"Auto-reply skipped: {exc}")
+            print("Done. Processed at most one message and exiting.")
+            return 0
+
         reply_payload = {
             "from": args.agent,
-            "body": args.auto_reply,
+            "body": reply_body,
             "risk_level": "DOCUMENTATION ONLY",
         }
         if args.dry_run:
