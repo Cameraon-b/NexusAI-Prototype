@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 Set-Location $Project
 
 py "$Project\scripts\nexusai_agent_worker.py" `
-  --base-url "http://127.0.0.1:5055" `
+  --base-url "http://nexus.aether.lab" `
   --agent "Hermes" `
   --ack `
   --auto-reply `

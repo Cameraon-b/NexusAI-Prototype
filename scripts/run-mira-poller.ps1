@@ -11,7 +11,7 @@ New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 Set-Location $Project
 
 py "$Project\scripts\nexusai_agent_worker.py" `
-  --base-url "http://192.168.1.134:5055" `
+  --base-url "http://nexus.aether.lab" `
   --agent "Mira" `
   --ack `
   --auto-reply `
