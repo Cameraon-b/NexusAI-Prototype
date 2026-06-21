@@ -383,7 +383,7 @@ def create_message(payload: MessageCreate, _: None = Depends(require_local_passw
         log_action(conn, sender, "create", "message", item_id, f"Message to {payload.to}: {payload.subject}")
         if requires_approval:
             cameron = participant_id(conn, "Cameron")
-            reason = "AI-to-AI messages require Cameron approval by default." if is_ai_to_ai else "Message risk requires approval."
+            reason = "AI-to-AI messages require Admin approval by default." if is_ai_to_ai else "Message risk requires approval."
             approval = conn.execute(
                 """
                 INSERT INTO approval_requests (requested_by_id, requested_for_id, target_type, target_id, action_type, action_summary, reason, risk_level_id, status)
