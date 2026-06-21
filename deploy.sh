@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="/home/noratheredeemer/nexusai"
+LOG_DIR="$APP_DIR/logs"
+BACKUP_DIR="$APP_DIR/backups"
+DB_FILE="$APP_DIR/data/nexusai.db"
+TIMESTAMP="$(date +%F-%H%M%S)"
+
+mkdir -p "$LOG_DIR" "$BACKUP_DIR"
+
+exec > >(tee -a "$LOG_DIR/deploy-$TIMESTAMP.log") 2>&1
+
+echo "=== NexusAI deploy started: $(date) ==="
+echo "App directory: $APP_DIR"
+
+cd "$APP_DIR"
+
+echo
+echo "Current git commit:"
+git rev-parse --short HEAD || true
+
+echo
+echo "Backing up SQLite database if present..."
+if [ -f "$DB_FILE" ]; then
+    cp "$DB_FILE" "$BACKUP_DIR/nexusai-$TIMESTAMP.db"
+    echo "Database backed up to $BACKUP_DIR/nexusai-$TIMESTAMP.db"
+else
+    echo "No database found at $DB_FILE"
+fi
+
+echo
+echo "Pulling latest code..."
+git pull
+
+echo
+echo "New git commit:"
+git rev-parse --short HEAD || true
+
+echo
+echo "Rebuilding and restarting NexusAI..."
+sudo docker compose up --build -d
+
+echo
+echo "Current container status:"
+sudo docker compose ps
+
+echo
+echo "Recent logs:"
+sudo docker compose logs --tail=50 nexusai || sudo docker compose logs --tail=50
+
+echo
+echo "=== NexusAI deploy finished: $(date) ==="
