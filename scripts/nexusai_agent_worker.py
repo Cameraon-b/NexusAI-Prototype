@@ -200,15 +200,12 @@ def maybe_process_existing_bridge_response(args: argparse.Namespace) -> bool:
             print("Duplicate prevention: a reply from this agent already exists for this parent message; not posting again.")
             archive_bridge_files(request_path, response_path)
             return True
-        # If the first bridge run already acknowledged the message these calls may be rejected; that is okay.
-        try:
-            maybe_mark_read_ack(args, message_id)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Read/ack skipped or already complete: {exc}")
         risk_level = response.get("risk_level") or DEFAULT_RISK
         if risk_level == UNKNOWN_RISK:
             print("Bridge response risk is UNKNOWN / NEEDS REVIEW; NexusAI must require approval before delivery.")
-        post_reply(args, message_id, response["reply_body"], risk_level)
+        reply = post_reply(args, message_id, response["reply_body"], risk_level)
+        if reply is not None:
+            maybe_mark_read_ack_after_bridge_reply(args, message)
         archive_bridge_files(request_path, response_path)
         return True
     return False
@@ -267,6 +264,38 @@ def maybe_mark_read_ack(args: argparse.Namespace, message_id: int) -> None:
             print_json("Acknowledged:", ack_result)
 
 
+def maybe_mark_read_ack_after_bridge_reply(args: argparse.Namespace, message: dict[str, Any]) -> None:
+    """Best-effort completion marking after a bridge reply posts.
+
+    Bridge-file mode must not acknowledge before a response exists. Once the
+    reply is posted, the parent may still be delivered, or may already be read /
+    acknowledged because of an older worker run. Tolerate those states without
+    blocking the bridge reply.
+    """
+    message_id = int(message["id"])
+    delivery_status = str(message.get("delivery_status") or message.get("status") or "").lower()
+    if delivery_status == "acknowledged":
+        print("Parent message already acknowledged; skipping read/ack completion update.")
+        return
+    if args.dry_run:
+        print("DRY RUN: would mark message read/ack after bridge reply")
+        return
+    if delivery_status == "read":
+        print("Parent message already read; skipping read update.")
+    else:
+        try:
+            read_result = call("POST", f"/api/messages/{message_id}/read", {"participant": args.agent})
+            print_json("Marked read after bridge reply:", read_result)
+        except SystemExit as exc:
+            print(f"Read completion skipped: {exc}")
+    if args.ack:
+        try:
+            ack_result = call("POST", f"/api/messages/{message_id}/acknowledge", {"participant": args.agent})
+            print_json("Acknowledged after bridge reply:", ack_result)
+        except SystemExit as exc:
+            print(f"Acknowledge completion skipped: {exc}")
+
+
 def post_reply(args: argparse.Namespace, message_id: int, reply_body: str, risk_level: str = DEFAULT_RISK) -> dict[str, Any] | None:
     reply_payload = {"from": args.agent, "body": reply_body, "risk_level": risk_level or DEFAULT_RISK}
     if args.dry_run:
@@ -314,7 +343,9 @@ def handle_bridge_file(args: argparse.Namespace, message: dict[str, Any]) -> Non
     risk_level = response.get("risk_level") or DEFAULT_RISK
     if risk_level == UNKNOWN_RISK:
         print("Bridge response risk is UNKNOWN / NEEDS REVIEW; NexusAI must require approval before delivery.")
-    post_reply(args, message_id, response["reply_body"], risk_level)
+    reply = post_reply(args, message_id, response["reply_body"], risk_level)
+    if reply is not None:
+        maybe_mark_read_ack_after_bridge_reply(args, message)
     archive_bridge_files(request_path, response_path)
 
 
@@ -348,10 +379,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Subject: {message.get('subject', '')}")
     if reply_already_exists(message, args.agent):
         print("Duplicate prevention: reply already exists for this parent message; not creating another reply.")
-        maybe_mark_read_ack(args, message_id)
+        if args.auto_reply_mode != "bridge-file":
+            maybe_mark_read_ack(args, message_id)
+        else:
+            print("Bridge-file mode: skipping early read/ack while preventing duplicate reply.")
         print("Done. Processed at most one message and exiting.")
         return 0
-    if not (args.dry_run and args.auto_reply and args.auto_reply_mode == "bridge-file"):
+    if not (args.auto_reply and args.auto_reply_mode == "bridge-file"):
         maybe_mark_read_ack(args, message_id)
     if args.auto_reply:
         explicit_reply_text = "" if args.auto_reply == DEFAULT_AUTO_REPLY else args.auto_reply

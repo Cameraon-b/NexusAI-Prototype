@@ -74,3 +74,147 @@ def test_agent_bridge_mode_aliases_bridge_file_and_does_not_generate_immediate_b
     message = {"subject": "Future bridge", "body": "Please hand this to the real runtime later."}
     with pytest.raises(ValueError):
         worker.build_auto_reply_body(message, "bridge-file")
+
+
+def test_bridge_file_first_run_creates_request_without_read_or_ack(tmp_path, monkeypatch):
+    bridge_dir = tmp_path / "bridge"
+    message = {
+        "id": 42,
+        "conversation_id": 7,
+        "from": "Mira",
+        "to": "Hermes",
+        "subject": "Bridge ordering",
+        "body": "Please bridge this safely.",
+        "risk_level": worker.DEFAULT_RISK,
+        "status": "delivered",
+        "delivery_status": "delivered",
+    }
+    calls = []
+
+    def fake_call(method, path, payload=None):
+        calls.append((method, path, payload))
+        if path.startswith("/api/agent-inbox/"):
+            return {"messages": [message]}
+        if path == "/api/conversations/7/messages":
+            return []
+        raise AssertionError(f"unexpected call: {method} {path} {payload}")
+
+    monkeypatch.setattr(worker, "call", fake_call)
+
+    code = worker.main([
+        "--base-url", "http://example.test",
+        "--agent", "Hermes",
+        "--ack",
+        "--auto-reply",
+        "--auto-reply-mode", "bridge-file",
+        "--bridge-dir", str(bridge_dir),
+        "--bridge-fallback", "none",
+    ])
+
+    assert code == 0
+    assert (bridge_dir / "request-message-42-Hermes.json").exists()
+    paths = [path for _method, path, _payload in calls]
+    assert "/api/messages/42/read" not in paths
+    assert "/api/messages/42/acknowledge" not in paths
+    assert "/api/messages/42/reply" not in paths
+
+
+def test_bridge_file_response_posts_after_acknowledged_parent_without_duplicate(tmp_path, monkeypatch):
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    request_path = bridge_dir / "request-message-42-Hermes.json"
+    response_path = bridge_dir / "response-message-42-Hermes.json"
+    request_path.write_text("{}\n", encoding="utf-8")
+    response_path.write_text(
+        '{"message_id": 42, "agent": "Hermes", "reply_body": "Bridge response ready.", "risk_level": "DOCUMENTATION ONLY", "ready": true}\n',
+        encoding="utf-8",
+    )
+    parent = {
+        "id": 42,
+        "conversation_id": 7,
+        "from": "Mira",
+        "to": "Hermes",
+        "subject": "Bridge ordering",
+        "body": "Please bridge this safely.",
+        "risk_level": worker.DEFAULT_RISK,
+        "status": "acknowledged",
+        "delivery_status": "acknowledged",
+        "requires_approval": True,
+        "approved_by": "Cameron",
+    }
+    calls = []
+
+    def fake_call(method, path, payload=None):
+        calls.append((method, path, payload))
+        if method == "GET" and path == "/api/messages/42":
+            return parent
+        if method == "GET" and path == "/api/conversations/7/messages":
+            return [parent]
+        if method == "POST" and path == "/api/messages/42/reply":
+            return {
+                "id": 99,
+                "parent_message_id": 42,
+                "from": "Hermes",
+                "to": "Mira",
+                "status": "pending_approval",
+                "delivery_status": "pending_approval",
+                "requires_approval": True,
+            }
+        raise AssertionError(f"unexpected call: {method} {path} {payload}")
+
+    monkeypatch.setattr(worker, "call", fake_call)
+
+    code = worker.main([
+        "--base-url", "http://example.test",
+        "--agent", "Hermes",
+        "--ack",
+        "--auto-reply",
+        "--auto-reply-mode", "bridge-file",
+        "--bridge-dir", str(bridge_dir),
+        "--bridge-fallback", "none",
+    ])
+
+    assert code == 0
+    assert not response_path.exists()
+    assert list((bridge_dir / "archive").glob("response-message-42-Hermes-processed-*.json"))
+    reply_calls = [c for c in calls if c[1] == "/api/messages/42/reply"]
+    assert len(reply_calls) == 1
+    assert reply_calls[0][2]["body"] == "Bridge response ready."
+    paths = [path for _method, path, _payload in calls]
+    assert "/api/messages/42/read" not in paths
+    assert "/api/messages/42/acknowledge" not in paths
+
+
+def test_bridge_file_duplicate_response_is_archived_without_second_reply(tmp_path, monkeypatch):
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "request-message-42-Hermes.json").write_text("{}\n", encoding="utf-8")
+    response_path = bridge_dir / "response-message-42-Hermes.json"
+    response_path.write_text(
+        '{"message_id": 42, "agent": "Hermes", "reply_body": "Bridge response ready again.", "risk_level": "DOCUMENTATION ONLY", "ready": true}\n',
+        encoding="utf-8",
+    )
+    parent = {"id": 42, "conversation_id": 7, "from": "Mira", "to": "Hermes", "status": "acknowledged", "delivery_status": "acknowledged"}
+    existing_reply = {"id": 99, "parent_message_id": 42, "from": "Hermes", "to": "Mira", "status": "pending_approval"}
+    calls = []
+
+    def fake_call(method, path, payload=None):
+        calls.append((method, path, payload))
+        if method == "GET" and path == "/api/messages/42":
+            return parent
+        if method == "GET" and path == "/api/conversations/7/messages":
+            return [parent, existing_reply]
+        raise AssertionError(f"unexpected call: {method} {path} {payload}")
+
+    monkeypatch.setattr(worker, "call", fake_call)
+    code = worker.main([
+        "--agent", "Hermes",
+        "--ack",
+        "--auto-reply",
+        "--auto-reply-mode", "bridge-file",
+        "--bridge-dir", str(bridge_dir),
+    ])
+
+    assert code == 0
+    assert not response_path.exists()
+    assert all(path != "/api/messages/42/reply" for _method, path, _payload in calls)
