@@ -232,6 +232,93 @@ def test_agent_inbox_read_ack_reply_and_logs(tmp_path):
         assert 'create_reply' in actions
 
 
+def approve_message_delivery(c, message_id: int):
+    approval = next(a for a in c.get('/api/approvals').json() if a['target_id'] == message_id and a['target_type'] == 'message')
+    approved = c.patch(f"/api/approvals/{approval['id']}", json={'status': 'approved', 'approved_by': 'Cameron'})
+    assert approved.status_code == 200
+    return approved.json()
+
+
+def test_reply_endpoint_routes_mira_to_hermes_parent_back_to_mira(tmp_path):
+    with client(tmp_path) as c:
+        parent = c.post('/api/messages', json={
+            'from': 'Mira',
+            'to': 'Hermes',
+            'subject': 'Routing test Mira parent',
+            'body': 'Hermes should reply to Mira.',
+            'risk_level': 'DOCUMENTATION ONLY',
+            'status': 'delivered',
+        }).json()
+        approve_message_delivery(c, parent['id'])
+
+        reply = c.post(f"/api/messages/{parent['id']}/reply", json={
+            'from': 'Hermes',
+            'body': 'Reply back to Mira.',
+            'risk_level': 'DOCUMENTATION ONLY',
+        })
+
+        assert reply.status_code == 201
+        body = reply.json()
+        assert body['from'] == 'Hermes'
+        assert body['to'] == 'Mira'
+        assert body['conversation_id'] == parent['conversation_id']
+        assert body['parent_message_id'] == parent['id']
+        assert body['status'] == 'pending_approval'
+        assert body['delivery_status'] == 'pending_approval'
+        assert body['requires_approval'] is True
+
+
+def test_reply_endpoint_routes_hermes_to_mira_parent_back_to_hermes(tmp_path):
+    with client(tmp_path) as c:
+        parent = c.post('/api/messages', json={
+            'from': 'Hermes',
+            'to': 'Mira',
+            'subject': 'Routing test Hermes parent',
+            'body': 'Mira should reply to Hermes.',
+            'risk_level': 'DOCUMENTATION ONLY',
+            'status': 'delivered',
+        }).json()
+        approve_message_delivery(c, parent['id'])
+
+        reply = c.post(f"/api/messages/{parent['id']}/reply", json={
+            'from': 'Mira',
+            'body': 'Reply back to Hermes.',
+            'risk_level': 'DOCUMENTATION ONLY',
+        })
+
+        assert reply.status_code == 201
+        body = reply.json()
+        assert body['from'] == 'Mira'
+        assert body['to'] == 'Hermes'
+        assert body['conversation_id'] == parent['conversation_id']
+        assert body['parent_message_id'] == parent['id']
+        assert body['status'] == 'pending_approval'
+        assert body['delivery_status'] == 'pending_approval'
+        assert body['requires_approval'] is True
+
+
+def test_reply_endpoint_rejects_sender_that_is_not_parent_recipient(tmp_path):
+    with client(tmp_path) as c:
+        parent = c.post('/api/messages', json={
+            'from': 'Hermes',
+            'to': 'Mira',
+            'subject': 'Bad self reply test',
+            'body': 'Hermes should not reply as Hermes to its own parent message.',
+            'risk_level': 'DOCUMENTATION ONLY',
+            'status': 'delivered',
+        }).json()
+        approve_message_delivery(c, parent['id'])
+
+        reply = c.post(f"/api/messages/{parent['id']}/reply", json={
+            'from': 'Hermes',
+            'body': 'This would route Hermes to Hermes and must be rejected.',
+            'risk_level': 'DOCUMENTATION ONLY',
+        })
+
+        assert reply.status_code == 409
+        assert 'parent message recipient' in reply.json()['detail']
+
+
 def test_agent_inbox_hides_pending_ai_to_ai_until_cameron_approval(tmp_path):
     with client(tmp_path) as c:
         res = c.post('/api/messages', json={

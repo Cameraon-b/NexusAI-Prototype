@@ -196,6 +196,13 @@ def maybe_process_existing_bridge_response(args: argparse.Namespace) -> bool:
         if not isinstance(message, dict):
             print(f"Bridge response rejected: could not load message #{message_id}")
             return True
+        if not parent_is_addressed_to_agent(message, args.agent):
+            print(
+                "Bridge response rejected: parent message is addressed "
+                f"to {message.get('to')!r}, not {args.agent!r}; not posting."
+            )
+            archive_bridge_files(request_path, response_path)
+            return True
         if reply_already_exists(message, args.agent):
             print("Duplicate prevention: a reply from this agent already exists for this parent message; not posting again.")
             archive_bridge_files(request_path, response_path)
@@ -209,6 +216,11 @@ def maybe_process_existing_bridge_response(args: argparse.Namespace) -> bool:
         archive_bridge_files(request_path, response_path)
         return True
     return False
+
+
+def parent_is_addressed_to_agent(message: dict[str, Any], agent: str) -> bool:
+    recipient = str(message.get("to") or "").strip().lower()
+    return recipient == agent.strip().lower()
 
 
 def reply_already_exists(message: dict[str, Any], agent: str) -> bool:
@@ -335,6 +347,13 @@ def handle_bridge_file(args: argparse.Namespace, message: dict[str, Any]) -> Non
         fallback_body = build_auto_reply_body(message, args.bridge_fallback)
         print(f"Bridge fallback enabled: {args.bridge_fallback}")
         post_reply(args, message_id, fallback_body, DEFAULT_RISK)
+        return
+    if not parent_is_addressed_to_agent(message, args.agent):
+        print(
+            "Bridge response rejected: parent message is addressed "
+            f"to {message.get('to')!r}, not {args.agent!r}; not posting."
+        )
+        archive_bridge_files(request_path, response_path)
         return
     if reply_already_exists(message, args.agent):
         print("Duplicate prevention: a reply from this agent already exists for this parent message; not posting again.")

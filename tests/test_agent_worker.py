@@ -218,3 +218,38 @@ def test_bridge_file_duplicate_response_is_archived_without_second_reply(tmp_pat
     assert code == 0
     assert not response_path.exists()
     assert all(path != "/api/messages/42/reply" for _method, path, _payload in calls)
+
+
+def test_bridge_file_response_for_wrong_recipient_is_rejected_without_self_reply(tmp_path, monkeypatch):
+    bridge_dir = tmp_path / "bridge"
+    bridge_dir.mkdir()
+    (bridge_dir / "request-message-42-Hermes.json").write_text("{}\n", encoding="utf-8")
+    response_path = bridge_dir / "response-message-42-Hermes.json"
+    response_path.write_text(
+        '{"message_id": 42, "agent": "Hermes", "reply_body": "Wrong agent response.", "risk_level": "DOCUMENTATION ONLY", "ready": true}\n',
+        encoding="utf-8",
+    )
+    # This mirrors the observed failure shape: a response file for Hermes exists,
+    # but the parent message was addressed to Mira, so posting as Hermes would
+    # create Hermes -> Hermes. The worker must reject it before /reply.
+    parent = {"id": 42, "conversation_id": 7, "from": "Hermes", "to": "Mira", "status": "acknowledged", "delivery_status": "acknowledged"}
+    calls = []
+
+    def fake_call(method, path, payload=None):
+        calls.append((method, path, payload))
+        if method == "GET" and path == "/api/messages/42":
+            return parent
+        raise AssertionError(f"unexpected call: {method} {path} {payload}")
+
+    monkeypatch.setattr(worker, "call", fake_call)
+    code = worker.main([
+        "--agent", "Hermes",
+        "--ack",
+        "--auto-reply",
+        "--auto-reply-mode", "bridge-file",
+        "--bridge-dir", str(bridge_dir),
+    ])
+
+    assert code == 0
+    assert not response_path.exists()
+    assert all(path != "/api/messages/42/reply" for _method, path, _payload in calls)

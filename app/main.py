@@ -52,10 +52,12 @@ async def lifespan(_: FastAPI):
     yield
 
 
+APP_VERSION = "0.05"
+
 app = FastAPI(
     title="NexusAI",
     description="AETHER internal operations desk for messages, tasks, reviews, notices, approvals, and append-only audit logs. It does not execute commands.",
-    version="0.2.0",
+    version=APP_VERSION,
     lifespan=lifespan,
 )
 
@@ -242,7 +244,7 @@ def ui_page(page_name: str) -> FileResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "NexusAI", "command_execution": "disabled", "safety": "Approval does not equal execution."}
+    return {"status": "ok", "service": "NexusAI", "version": APP_VERSION, "command_execution": "disabled", "safety": "Approval does not equal execution."}
 
 
 @app.get("/api/dashboard", response_model=DashboardOut)
@@ -496,6 +498,8 @@ def reply_to_message(message_id: int, payload: MessageReplyCreate, _: None = Dep
     parent = parent_rows[0]
     if parent.get("conversation_id") is None:
         raise HTTPException(status_code=409, detail="Message has no conversation")
+    if str(payload.from_).strip().lower() != str(parent.get("to") or "").strip().lower():
+        raise HTTPException(status_code=409, detail="Reply sender must match the parent message recipient")
     with connect() as conn:
         conv = conn.execute("SELECT * FROM conversations WHERE id=?", (parent["conversation_id"],)).fetchone()
         if not conv:
