@@ -25,6 +25,20 @@ async function api(path, options = {}) {
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
   return res.status === 204 ? null : res.json();
 }
+function renderVersion(info = {}) {
+  const el = document.querySelector('#version-status');
+  if (!el) return;
+  const app = info.app || 'NexusAI';
+  const version = info.version || 'unknown';
+  const commit = info.commit || 'unknown';
+  const environment = info.environment || 'AETHER';
+  const host = info.host || 'Nora';
+  el.textContent = `${app} v${version} · commit ${commit} · ${environment} / ${host}`;
+}
+async function loadVersion() {
+  try { renderVersion(await api('/version')); }
+  catch (_err) { renderVersion({app: 'NexusAI', version: 'unknown', commit: 'unknown', environment: 'AETHER', host: 'Nora'}); }
+}
 function esc(value) { return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
 function titleize(value) { return String(value ?? '').replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase()); }
 function riskClass(risk, item = {}) {
@@ -251,4 +265,5 @@ async function route() {
     return dashboard();
   } catch (err) { page('Error', 'NexusAI could not render this view.', `<pre>${esc(err.stack || err.message || err)}</pre>`); }
 }
+loadVersion();
 route();

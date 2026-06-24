@@ -34,8 +34,15 @@ echo "Pulling latest code..."
 git pull
 
 echo
+NEW_COMMIT="$(git rev-parse --short HEAD || true)"
 echo "New git commit:"
-git rev-parse --short HEAD || true
+echo "$NEW_COMMIT"
+if [ -n "$NEW_COMMIT" ]; then
+    printf '%s\n' "$NEW_COMMIT" > .nexusai_commit
+    echo "Wrote build commit to $APP_DIR/.nexusai_commit"
+else
+    echo "WARNING: could not determine git commit; version endpoint will report unknown commit"
+fi
 
 echo
 echo "Rebuilding and restarting NexusAI..."

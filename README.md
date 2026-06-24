@@ -264,6 +264,14 @@ Health endpoint:
 http://nexus.aether.lab/api/health
 ```
 
+Version/build endpoint:
+
+```text
+http://nexus.aether.lab/api/version
+```
+
+`deploy.sh` writes the current short Git commit to `.nexusai_commit` after `git pull`. The UI footer reads `/api/version` and displays the app name, prototype version, commit, environment, and host so Cameron can confirm Nora is running the expected build.
+
 Suggested Nginx Proxy Manager route:
 
 ```text
@@ -546,6 +554,20 @@ Three-command bridge flow:
 py .\scripts\nexusai_agent_worker.py --base-url http://nexus.aether.lab --agent Hermes --ack --auto-reply --auto-reply-mode bridge-file --bridge-fallback none
 py .\scripts\nexusai_bridge_responder.py --agent Hermes --bridge-dir .\scripts\bridge_queue --mode template
 py .\scripts\nexusai_agent_worker.py --base-url http://nexus.aether.lab --agent Hermes --ack --auto-reply --auto-reply-mode bridge-file --bridge-fallback none
+```
+
+Manual/Task Scheduler bridge-cycle wrappers run that full sequence and append sectioned logs:
+
+```powershell
+./scripts/run-hermes-bridge-cycle.ps1
+./scripts/run-mira-bridge-cycle.ps1
+```
+
+The older template poller wrappers remain available as fallback/known-good mode:
+
+```powershell
+./scripts/run-hermes-poller.ps1
+./scripts/run-mira-poller.ps1
 ```
 
 Dry run:

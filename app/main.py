@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -44,6 +45,12 @@ from .models import (
 
 APP_DIR = Path(__file__).resolve().parent
 STATIC_DIR = APP_DIR / "static"
+PROJECT_ROOT = APP_DIR.parent
+COMMIT_FILE = PROJECT_ROOT / ".nexusai_commit"
+APP_NAME = "NexusAI"
+APP_VERSION = "0.05"
+DEFAULT_ENVIRONMENT = "AETHER"
+DEFAULT_HOST = "Nora"
 
 
 @asynccontextmanager
@@ -51,8 +58,6 @@ async def lifespan(_: FastAPI):
     init_db()
     yield
 
-
-APP_VERSION = "0.05"
 
 app = FastAPI(
     title="NexusAI",
@@ -62,6 +67,27 @@ app = FastAPI(
 )
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def read_commit() -> str:
+    env_commit = os.getenv("NEXUSAI_COMMIT", "").strip()
+    if env_commit:
+        return env_commit
+    try:
+        value = COMMIT_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return "unknown"
+    return value or "unknown"
+
+
+def version_info() -> dict[str, str]:
+    return {
+        "app": APP_NAME,
+        "version": APP_VERSION,
+        "commit": read_commit(),
+        "environment": os.getenv("NEXUSAI_ENVIRONMENT", DEFAULT_ENVIRONMENT).strip() or DEFAULT_ENVIRONMENT,
+        "host": os.getenv("NEXUSAI_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST,
+    }
 
 
 def require_local_password(x_nexusai_password: str | None = Header(default=None)) -> None:
@@ -242,9 +268,14 @@ def ui_page(page_name: str) -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/api/version")
+def api_version() -> dict[str, str]:
+    return version_info()
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "service": "NexusAI", "version": APP_VERSION, "command_execution": "disabled", "safety": "Approval does not equal execution."}
+    return {**version_info(), "status": "ok", "service": APP_NAME, "command_execution": "disabled", "safety": "Approval does not equal execution."}
 
 
 @app.get("/api/dashboard", response_model=DashboardOut)

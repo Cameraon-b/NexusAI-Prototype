@@ -56,8 +56,9 @@ a:hover { color: #7dd3fc; text-decoration: underline; }
 .main-nav a { color: var(--muted); border: 1px solid transparent; border-radius: 999px; padding: 6px 11px; white-space: nowrap; }
 .main-nav a:hover { color: var(--ink); border-color: var(--line); background: var(--surface-2); text-decoration: none; }
 main { padding: 26px 34px 30px; }
-footer { padding: 18px 34px 34px; color: var(--muted-2); font-size: 14px; }
-footer::after { content: "  · No agent shall chown the kingdom."; color: var(--secondary); }
+footer { padding: 18px 34px 34px; color: var(--muted-2); font-size: 14px; display: grid; gap: 6px; }
+.version-status { color: var(--ink); font-weight: 700; letter-spacing: .02em; }
+footer::after { content: "No agent shall chown the kingdom."; color: var(--secondary); }
 
 .page-title h1 { font-size: 28px; margin: 0; letter-spacing: -.02em; }
 .page-title p { margin: 2px 0 24px; color: var(--muted); }

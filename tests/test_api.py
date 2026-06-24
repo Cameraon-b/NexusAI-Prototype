@@ -25,6 +25,51 @@ def client(tmp_path: Path):
             os.environ['NEXUSAI_DB_PATH'] = old_db
 
 
+def test_version_endpoint_returns_build_info_without_commit_file(tmp_path, monkeypatch):
+    from app import main as app_main
+
+    missing_commit = tmp_path / 'missing-commit-file'
+    monkeypatch.setattr(app_main, 'COMMIT_FILE', missing_commit)
+
+    with client(tmp_path) as c:
+        res = c.get('/api/version')
+        assert res.status_code == 200
+        data = res.json()
+        assert data['app'] == 'NexusAI'
+        assert data['version']
+        assert data['commit'] == 'unknown'
+        assert data['environment'] == 'AETHER'
+        assert data['host'] == 'Nora'
+
+
+def test_health_endpoint_includes_version_build_info(tmp_path, monkeypatch):
+    from app import main as app_main
+
+    commit_file = tmp_path / '.nexusai_commit'
+    commit_file.write_text('abc1234\n', encoding='utf-8')
+    monkeypatch.setattr(app_main, 'COMMIT_FILE', commit_file)
+
+    with client(tmp_path) as c:
+        data = c.get('/api/health').json()
+        assert data['app'] == 'NexusAI'
+        assert data['version']
+        assert data['commit'] == 'abc1234'
+        assert data['environment'] == 'AETHER'
+        assert data['host'] == 'Nora'
+        assert data['command_execution'] == 'disabled'
+
+
+def test_frontend_static_contains_visible_version_mount_and_fetch(tmp_path):
+    with client(tmp_path) as c:
+        html = c.get('/').text
+        js = c.get('/static/app.js').text
+        assert 'id="version-status"' in html
+        assert 'Loading build info' in html
+        assert "api('/version')" in js
+        assert 'renderVersion' in js
+        assert 'unknown' in js
+
+
 def test_participants_and_reference_data_seeded(tmp_path):
     with client(tmp_path) as c:
         res = c.get('/api/participants')
