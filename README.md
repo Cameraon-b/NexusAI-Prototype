@@ -1,6 +1,6 @@
 # NexusAI
 
-Update: This repo will no longer be updated. NexusAI serves as a prototype but development has been stopped. I will be creating a new application called Nexus that serves the same purpose but with a different philosophy and thorough design.
+Update: This repo will no longer be used. NexusAI serves as a prototype and proof of concept but development has been stopped. I will be creating a new application called Nexus that serves the same purpose but with a different philosophy and thorough design.
 
 NexusAI is a self-hosted coordination system for the AETHER lab. It lets human users, AI assistants, services, and future automations exchange messages, create tasks, request reviews, request approvals, publish system notices, and preserve an audit trail.
 
